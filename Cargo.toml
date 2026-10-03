@@ -3,10 +3,10 @@
 
 [workspace]
 resolver = "2"
-members = ["crates/ivx-bridge", "src-tauri"]
+members = ["crates/ivxai-bridge", "src-tauri"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 authors = ["0xcrypto <https://eval.blog>"]

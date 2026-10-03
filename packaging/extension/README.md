@@ -56,6 +56,15 @@ so rather than implying otherwise.
 | `sidePanel` (Chrome) | the app's only UI; Firefox uses `sidebar_action`, which needs none, and Safari has neither |
 | `declarativeNetRequestWithHostAccess` (Chrome, Safari) | one rule, removing `Origin` from this extension's own requests — see below. The `WithHostAccess` spelling modifies only hosts already granted, and carries no install warning of its own |
 | `webRequest`, `webRequestBlocking` (Firefox) | the same rule, the only way Firefox will apply it to an extension's own requests |
+| `scripting` | registering the page-tools content script at runtime, for the sites you allowed and no others — and reading a mentioned page. No install warning |
+| `storage` | three small things the page end needs and cannot ask the app for: which sites are allowed, the agent names its picker offers, and a request waiting for the panel to open. No install warning |
+| `identity` | signing in to an MCP server that uses OAuth. No authorization server will redirect to `chrome-extension://`, and `identity.launchWebAuthFlow` supplies an https address on the browser's own domain instead. Optional on Chrome and Safari, so it is asked for on the click that needs it and an install that never connects such a server is never asked; required on Firefox, which drops it from `optional_permissions` rather than honouring it. No install warning either way |
+
+Note what is *not* there: no `tabs`. Listing the tabs an `@` mention can name
+uses `tabs.query`, which any extension may call — the browser withholds the
+title and address of every tab you have not granted a host for, so the list is
+exactly the allowed sites and the permission that shows on install as "read
+your browsing history" is never asked for.
 
 `npm run ext:test` checks the model from both ends: that a CORS-less endpoint is
 out of reach before the grant, and in reach after it. Firefox goes through the
@@ -80,8 +89,8 @@ npm run ext:safari             # generate and build the Safari app
 ## Publishing
 
 Tagging a release builds the Chrome and Firefox zips, attaches both to the
-GitHub release, and uploads the Chrome one to the Web Store and submits it for
-review. Safari is not in that job: what it installs is an app, and only Xcode on
+GitHub release, and submits each to its store for review: the Chrome Web Store
+and addons.mozilla.org. Safari is not in that job: what it installs is an app, and only Xcode on
 a Mac can produce one.
 
 Submitting is not going live. The store reviews it, in anywhere from an hour to
@@ -98,52 +107,87 @@ the workflow's job.
 
 ### Setting up the credentials, once
 
+The workflow signs in as a Google Cloud service account: a machine identity,
+so there is no consent screen to click through and no refresh token to expire.
+It goes through the store's v2 API, which is the only one left after v1.1 stops
+answering on 15 October 2026.
+
 In [console.cloud.google.com](https://console.cloud.google.com), on any project:
 
 1. **APIs & Services → Library** → enable **Chrome Web Store API**.
-2. **OAuth consent screen** → External → fill the required fields →
-   **Publish app**.
-3. **Credentials → Create credentials → OAuth client ID → Desktop app.**
+2. **IAM & Admin → Service Accounts → Create service account.** It needs no
+   roles.
+3. On that account, **Keys → Add key → Create new key → JSON**. A file
+   downloads.
 
-Step 2 is the one that bites. A consent screen left in *Testing* issues refresh
-tokens that stop working after seven days, so the release succeeds now and fails
-a fortnight later saying only `invalid_grant`. Publish it and the token keeps.
+Then in [the developer dashboard](https://chrome.google.com/webstore/devconsole),
+under **Account**, add the service account's email (the `client_email` in that
+file). The store takes one service account per publisher. On the
+**Publisher → Settings** page, note the publisher id.
 
-Then, locally:
-
-```sh
-WEBSTORE_CLIENT_ID=… WEBSTORE_CLIENT_SECRET=… npm run ext:auth
-```
-
-which opens the consent page and prints what to put in **Settings → Secrets and
-variables → Actions**:
+In **Settings → Secrets and variables → Actions**:
 
 | secret | |
 | --- | --- |
-| `WEBSTORE_CLIENT_ID` | from step 3 |
-| `WEBSTORE_CLIENT_SECRET` | from step 3 |
-| `WEBSTORE_REFRESH_TOKEN` | printed by `npm run ext:auth` |
-| `WEBSTORE_ITEM_ID` | the 32 letters in the dashboard URL |
+| `WEBSTORE_SERVICE_ACCOUNT` | the whole JSON file, pasted as it is |
+| `WEBSTORE_PUBLISHER_ID` | from Publisher → Settings |
+| `WEBSTORE_ITEM_ID` | the 32 letters in the item's store URL |
 
-The refresh token can publish to the store account on its own. Treat it as the
-credential it is.
+The key can publish to the store account on its own, and does not expire. Treat
+it as the credential it is, and delete the downloaded file once it is in the
+secret.
 
-Without `WEBSTORE_ITEM_ID` the publish step is skipped and the release still
-finishes with both zips attached, so a fork or a clone is never broken by
+Without `WEBSTORE_SERVICE_ACCOUNT` the publish step is skipped and the release
+still finishes with both zips attached, so a fork or a clone is never broken by
 secrets it does not have.
 
 ### Publishing by hand
 
 ```sh
-npm run ext:publish -- packaging/extension/build/ivxai-chat-0.2.2-chrome.zip
+WEBSTORE_SERVICE_ACCOUNT=path/to/key.json WEBSTORE_PUBLISHER_ID=… WEBSTORE_ITEM_ID=… \
+  npm run ext:publish -- packaging/extension/build/ivxai-chat-0.3.0-chrome.zip
 ```
 
-Uploads as a draft. Add `--publish` to submit it, or
-`--publish --target trustedTesters` to send it to testers rather than everyone.
-The same four environment variables apply.
+Uploads as a draft. Add `--publish` to submit it, or `--publish --staged` to have
+it held once approved rather than going live, until you publish it from the
+dashboard. `WEBSTORE_SERVICE_ACCOUNT` takes a path here, or the JSON itself as
+in the workflow.
 
-Firefox is attached to the release but not published: AMO wants its own
-credentials and its own review, and nobody has asked for that yet.
+### Firefox
+
+The first version went up by hand, as on Chrome. After that it is
+`scripts/amo-publish.mjs`, which needs an API key from addons.mozilla.org →
+**Developer Hub → Manage API Keys**:
+
+| secret | |
+| --- | --- |
+| `AMO_JWT_ISSUER` | the "JWT issuer", like `user:12345:678` |
+| `AMO_JWT_SECRET` | the "JWT secret" |
+
+The add-on is looked up by the gecko id in the manifest, `chat@ivx.run`, so the
+listing has to carry that id. `AMO_ADDON_ID` overrides it if it ever does not.
+
+Each version goes up with its source. The build bundles and minifies, and AMO
+reviewers ask for the code behind anything they cannot read, so the script
+attaches `git archive HEAD` — the whole repository at the commit being released
+— with approval notes pointing reviewers at `AMO-REVIEW.md` in this directory,
+which says how to rebuild the zip and diff it against the upload. Keep that file
+true when the build changes.
+
+There is no draft on AMO: creating a listed version is submitting it, and it
+goes live once review passes it. To try the key without submitting anything:
+
+```sh
+npm run ext:build firefox
+AMO_JWT_ISSUER=… AMO_JWT_SECRET=… npm run ext:publish:firefox -- \
+  packaging/extension/build/ivxai-chat-0.3.0-firefox.zip --check
+```
+
+which uploads it, runs AMO's validator over it, and stops. Drop `--check` to
+submit. `--source <zip>` sends a source archive of your own instead.
+
+AMO never accepts a version number twice, even one that was deleted, so a
+release that fails after the version was created needs a bump, not a retry.
 
 ## Installing it, by hand
 
@@ -172,12 +216,79 @@ ad-hoc — which is what the command above produces, because we do not pay Apple
 for a certificate — also needs *Develop → Allow Unsigned Extensions*, which
 Safari forgets every time it quits.
 
+## Page tools
+
+Select text on a page and a small bar offers to **summarize** it, **translate**
+it, or **ask an agent** about it; focus a text field and a chip offers to
+**write with an agent**. Each one opens the panel on a fresh chat with the
+request already in it, answered by the agent you picked or by the one the app
+is already on.
+
+It is off until you name a site. **Settings → Page tools** lists the sites it
+runs on, and adding one goes through the browser's own permission prompt, out
+of the same `<all_urls>` pool the provider grants come from. Removing a site
+gives the permission back.
+
+That is why `content.js` is shipped but is **not** in any manifest. A content
+script declared there brings its host permissions with it, and for a tool that
+could be used anywhere that is the "read and change all your data on all
+websites" install warning — which would not even be true: nothing runs on a
+site you have not named. `background.js` registers the script at runtime
+instead, with `scripting.registerContentScripts`, for exactly the patterns the
+browser has granted.
+
+Writing into a field goes through a tool call rather than straight from the
+reply. The model puts the text in a `<write>` block — the same shape as the
+`<ask>` and `<tool>` blocks the chat already uses, and for the same reason: it
+works on a provider with no function-calling at all. The block is parsed out
+and only what was inside it reaches the field, so "Sure, here's a draft:" stays
+in the chat instead of landing in somebody's outbox. `web/src/page-tools.js` is
+the app's end of all of it.
+
+Password fields get no chip. The chip carries the field's current contents up
+to the chat so you can ask for a revision, which is right for a paragraph and
+wrong for a password.
+
+## Mentions, and reading a page
+
+Type `@` in the composer to name an **open tab**, an **agent** or one of your
+own **chats**. What you name goes into the message where you were typing, and
+the thing itself is added to what the conversation carries — so "summarize it"
+has an *it*, and still does two turns later.
+
+Only tabs on allowed sites are listed. That is the same boundary as everything
+else here, seen from the other side: with no site allowed there is nothing to
+mention, and a host granted for a *provider* endpoint does not put your other
+tabs in the menu. `npm run ext:test` checks both.
+
+Naming a tab is also what unlocks the two reading tools:
+
+| block | what it does |
+| --- | --- |
+| `<snapshot tab="…">` | the page's HTML, with scripts, styles, inline handlers and framework `data-*` stripped out. A CSS selector inside the block narrows it to one part of the page |
+| `<screenshot tab="…">` | a picture of what is on screen in that tab, which arrives as an ordinary image attachment on the tool's own result |
+
+The permission says what the extension *may* read; the mention says what it
+*does*. A model is never told it can read every allowed tab, because a model
+told that goes and reads them.
+
+Firefox can photograph a tab that is not in front. Chrome and Safari cannot —
+`captureVisibleTab` means what it says — so the tab is brought forward for as
+long as the shutter takes and then put back.
+
+Anything a snapshot or screenshot returns is content from a web page, and the
+prompt says so in as many words: it is data, not instructions, and a page that
+asks the model to do something should be reported rather than obeyed. That is
+not a guarantee — nothing at this layer is — but it is the difference between
+a model that names the attempt and one that is surprised by it.
+
 ## What the manifests ask for
 
-`<all_urls>`, and per browser one permission for dropping the `Origin` header
-(below) plus `sidePanel` on Chrome. Nothing else: no `tabs`, no `storage`, no
-content scripts, no `web_accessible_resources` — the extension never touches a
-page you visit, because it never runs anywhere except its own panel.
+`<all_urls>`, `scripting` and `storage` for page tools, and per browser one
+permission for dropping the `Origin` header (below) plus `sidePanel` on Chrome.
+Nothing else: no `tabs`, no `web_accessible_resources`, and no content script
+in the manifest — page tools registers one at runtime for the sites you
+allowed, and nothing runs on any other page you visit.
 
 `<all_urls>` is broad, and the narrower thing does not exist: the endpoint is
 whichever one you typed. A provider you self-host, a runtime on a port only

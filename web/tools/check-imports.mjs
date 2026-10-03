@@ -37,6 +37,7 @@ const GLOBALS = new Set([
   'atob', 'btoa', 'isNaN', 'isFinite', 'parseInt', 'parseFloat', 'encodeURIComponent',
   'decodeURIComponent', 'encodeURI', 'decodeURI', 'import', 'super', 'require',
   'DOMParser', 'DOMException', 'CompressionStream', 'DecompressionStream',
+  'createImageBitmap', 'ImageBitmap', 'OffscreenCanvas',
   'Uint8Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'ArrayBuffer',
   'DataView', 'ReadableStream', 'WritableStream', 'TransformStream', 'Element', 'Node',
   'HTMLElement', 'CSSStyleSheet', 'matchMedia', 'getComputedStyle', 'open', 'close',

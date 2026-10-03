@@ -12,9 +12,11 @@ import * as api from './providers.js';
 import * as bridge from './bridge.js';
 import * as access from './host-access.js';
 import * as mcp from './mcp.js';
+import * as pageTools from './page-tools.js';
 import * as registry from './registry.js';
 import * as market from './market.js';
 import * as usage from './usage.js';
+import * as attach from './attach.js';
 import { parseConfig } from './mcp-config.js';
 import {
   el, toast, openSheet, pushScreen, popScreen, closeSheet, refreshSheet, entityScreen,
@@ -200,6 +202,11 @@ function rootScreen() {
         sub: storeSourcesLine(),
         onclick: () => pushScreen({ title: 'Store', render: storeScreen }),
       }),
+      pageTools.AVAILABLE ? navRow('Page tools', {
+        sub: pageToolsLine(),
+        dot: pageTools.sites().length > 0,
+        onclick: () => pushScreen({ title: 'Page tools', render: pageToolsScreen }),
+      }) : null,
       navRow('Sharing', {
         sub: app.getUI().shareBaseUrl
           ? String(app.getUI().shareBaseUrl).trim().replace(/\/+$/, '')
@@ -273,6 +280,112 @@ function providersScreen() {
 
     group(null, [
       actionRow('Add a provider', { onclick: addProvider }),
+    ]),
+  ]);
+}
+
+/* ── page tools ────────────────────────────────────────────── */
+
+/* Selecting text on a page offers to summarize it, translate it or put a
+   question about it to an agent; focusing a text field offers to write into
+   it. None of that runs anywhere until a site is named here.
+
+   Which is the whole screen, really. The extension asks for nothing on
+   install, and what it can reach afterwards is this list — one host at a time,
+   granted by the browser's own prompt on the click that names it, and given
+   back the moment the row goes. See web/src/page-tools.js and the note in
+   packaging/extension/background.js for what happens in between. */
+
+/** A match pattern as a person would say it. */
+const siteName = pattern => (pattern === pageTools.EVERY_SITE
+  ? 'Every site'
+  : pattern.replace(/^https?:\/\//, '').replace(/\/\*$/, ''));
+
+function pageToolsLine() {
+  const allowed = pageTools.sites();
+  if (!allowed.length) return 'Off — no sites allowed';
+  if (allowed.includes(pageTools.EVERY_SITE)) return 'On for every site';
+  return allowed.length === 1 ? `On for ${siteName(allowed[0])}` : `On for ${allowed.length} sites`;
+}
+
+function pageToolsScreen() {
+  const allowed = pageTools.sites();
+  const everywhere = allowed.includes(pageTools.EVERY_SITE);
+
+  const lang = el('input', {
+    class: 'form-control', type: 'text', value: app.getUI().pageToolsLang || '',
+    placeholder: pageTools.defaultLanguage(), spellcheck: 'false',
+    onchange: ev => {
+      app.setUI({ pageToolsLang: ev.target.value.trim() });
+      refreshSheet();
+    },
+  });
+
+  return el('div', {}, [
+    group('Runs on', [
+      ...allowed.map(pattern => actionRow(siteName(pattern), {
+        sub: 'Tap to stop running here',
+        onclick: () => pageTools.forget(pattern).then(refreshSheet),
+      })),
+      !allowed.length ? actionRow('No sites yet', {}) : null,
+      !everywhere ? actionRow('Allow a site…', {
+        sub: 'One host, and every page on it',
+        onclick: () => pushScreen({ title: 'Allow a site', render: allowSiteScreen }),
+      }) : null,
+      !everywhere ? actionRow('Allow every site', {
+        sub: 'The browser will say what that means before you agree',
+        // Straight out of the click, with nothing awaited first: the
+        // permission prompt needs the gesture, and an await loses it.
+        onclick: () => pageTools.allow(pageTools.EVERY_SITE).then(ok => {
+          toast(ok ? 'Page tools are on everywhere' : 'Not allowed', ok ? 'ok' : 'err');
+          refreshSheet();
+        }),
+      }) : null,
+    ], allowed.length
+      ? 'The bar appears on these sites and nowhere else. Removing a site gives ' +
+        'the permission back to the browser.'
+      : 'Page tools are off. Until a site is allowed, this extension cannot see ' +
+        'any page you visit — and that is what the browser told you on install.'),
+
+    group('Translate into', [
+      el('div', { class: 'item' }, [
+        el('div', { class: 'field w-100' }, [lang]),
+      ]),
+    ], 'What the Translate button asks for. Any language, written however you ' +
+       'would write it to a person; empty follows this browser.'),
+  ]);
+}
+
+/** Typing the host and allowing it are one screen, because they have to be
+    one click: the browser's permission prompt needs the gesture, and a prompt
+    for the host first would have spent it. */
+function allowSiteScreen() {
+  const host = el('input', {
+    class: 'form-control', type: 'text', placeholder: 'example.com',
+    spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off',
+  });
+
+  const allow = () => {
+    const pattern = pageTools.patternFor(host.value);
+    if (!pattern) { toast('That is not a site address', 'err'); return; }
+    pageTools.allow(pattern).then(ok => {
+      toast(ok ? `Page tools are on for ${siteName(pattern)}` : 'Not allowed',
+        ok ? 'ok' : 'err');
+      if (ok) popScreen();
+      else refreshSheet();
+    });
+  };
+
+  return el('div', {}, [
+    group(null, [
+      el('div', { class: 'item' }, [el('div', { class: 'field w-100' }, [host])]),
+    ], 'A host covers every page and every port on it — a browser permission ' +
+       'cannot be narrower than that.'),
+    el('div', { class: 'sheet-actions' }, [
+      el('button', {
+        class: 'btn btn-primary btn-block', type: 'button', text: 'Allow this site',
+        onclick: allow,
+      }),
     ]),
   ]);
 }
@@ -733,6 +846,9 @@ function mcpHealthLine(server) {
   const health = mcpHealth.get(server.id);
   if (!health) return where;
   if (health === 'checking') return 'Asking it what it offers…';
+  // The server's own sentence when it gave one: "needs sign-in" is the
+  // category, and what it actually objected to is the useful half.
+  if (health.needsAuth) return `Needs sign-in · ${health.detail || where}`;
   if (!health.ok) return `Not answering · ${health.error}`;
   if (!health.tools.length) return 'Answers, but offers no tools';
   return `${health.tools.length} tool${health.tools.length === 1 ? '' : 's'} · ${where}`;
@@ -994,6 +1110,74 @@ function mcpServerBody(server) {
     },
   });
 
+  /* Signing in, for a server that wants it.
+
+     Deliberately not hidden behind a "this server uses OAuth" setting: whether
+     it does is the server's business and it says so in a 401, so the row is
+     always offered and the discovery happens on the click. A server that
+     publishes no OAuth metadata says so then, in a sentence, and the bearer
+     token field above is still there for one that issues tokens by hand. */
+  const health = mcpHealth.get(server.id);
+  const isSignedIn = mcp.signedIn(server);
+
+  const signIn = ({ fresh = false } = {}) => {
+    /* Straight out of the click, with nothing awaited first. The popup and the
+       browser's `identity` permission both need the gesture this click is, and
+       the first await inside `connect` is the one that spends it. */
+    const running = toast(`Signing in to ${server.name}…`, '', 120000);
+    // Whatever it said before was said about the old token.
+    mcpHealth.delete(server.id);
+    mcp.connect(server, health?.challenge || '', { fresh })
+      .then(async () => {
+        running.remove();
+        toast(`Signed in to ${server.name}`, 'ok');
+        mcpHealth.set(server.id, await mcp.test(server));
+        refreshSheet();
+      })
+      .catch(err => {
+        running.remove();
+        toast(err.message || String(err), 'err', 10000);
+        refreshSheet();
+      });
+  };
+
+  /* Signed in, and refused anyway. Worth its own row: the fix is to go round
+     the flow again, and making someone sign out first to reach a sign-in
+     button is a step that exists only because we did not offer this one. */
+  const reAuthRow = isSignedIn && health?.needsAuth
+    ? actionRow('Sign in again', {
+        sub: health.detail || 'The server would not accept the last token',
+        // From scratch, registration included — see the note in mcp-oauth.js.
+        onclick: () => signIn({ fresh: true }),
+      })
+    : null;
+
+  const signInRow = isSignedIn
+    ? actionRow('Sign out', {
+        sub: server.oauth?.issuer
+          ? `Signed in · ${access.hostOf(server.oauth.issuer)}`
+          : 'Signed in',
+        onclick: async () => {
+          const ok = await confirmAction({
+            title: `Sign out of ${server.name}?`,
+            body: 'This browser forgets the token and the registration that goes with it. '
+              + 'Nothing is revoked at the server — remove the app there too if you want that.',
+            okText: 'Sign out',
+          });
+          if (!ok) return;
+          await mcp.disconnect(server);
+          mcpHealth.delete(server.id);
+          toast('Signed out');
+          refreshSheet();
+        },
+      })
+    : actionRow('Sign in', {
+        sub: health?.needsAuth
+          ? 'This server asked for it'
+          : 'For a server that signs you in rather than issuing a token',
+        onclick: () => signIn(),
+      });
+
   const isStdio = server.transport === 'stdio';
 
   return el('div', {}, [
@@ -1020,12 +1204,25 @@ function mcpServerBody(server) {
     ] : [
       group('Remote server', [
         el('div', { class: 'item' }, [field('URL', urlInput)]),
-        el('div', { class: 'item' }, [field('Bearer token', tokenInput,
-          'Stored in this browser only. Left empty for a server that wants none.')]),
+      ], 'The URL is the server\'s MCP endpoint.'),
+
+      group('Access', [
+        reAuthRow,
+        signInRow,
+        isSignedIn ? null : el('div', { class: 'item' }, [field('Bearer token', tokenInput,
+          'For a server that issued you one by hand. Stored in this browser only.')]),
+      ], isSignedIn
+        ? 'The token is kept with your API keys — encrypted at rest once you set a '
+          + 'passphrase under Privacy & data — and is refreshed on its own.'
+        : 'Most hosted servers sign you in: a window opens, you approve it there, '
+          + 'and the token comes back here. This app registers itself with the server '
+          + 'at that moment; there is no account of ours in between.'),
+
+      group('Connection', [
         headersButton,
         viaBridgeSwitch,
-      ], 'The URL is the server\'s MCP endpoint. If it refuses browser origins ' +
-        'with a CORS error, the switch above routes it through the bridge instead.'),
+      ], 'If the server refuses browser origins with a CORS error, the switch above '
+        + 'routes it through the bridge instead.'),
     ]),
 
     group(null, [testButton]),
@@ -1164,6 +1361,8 @@ function corsBypassScreen() {
 
     group('CORS bridge', rows, statusNote(s)),
 
+    hostedGroup(s),
+
     group('What this is', [
       actionRow('Why you might need it', {
         sub: bridge.EXTENSION
@@ -1176,8 +1375,104 @@ function corsBypassScreen() {
   ]);
 }
 
+const API_HELP = 'https://ai.ivx.run/api/';
+
+/**
+ * The hosted bridge, for when the one on this machine cannot run.
+ *
+ * Its own group, with its own switch, because it is a different promise: the
+ * bridge above is a program on this computer, and this is ours on the
+ * internet. The note under it says that in so many words, every time, rather
+ * than once in an about screen nobody opens.
+ */
+function hostedGroup(s) {
+  const h = s.hosted;
+  const host = (() => { try { return new URL(h.url).host; } catch { return h.url; } })();
+
+  const askToken = async () => {
+    const next = await promptText({
+      title: 'ivx/ai token',
+      value: h.token,
+      placeholder: 'ivx_…',
+    });
+    return next === null ? null : next.trim();
+  };
+
+  const toggle = async on => {
+    if (!on) {
+      await bridge.disableHosted();
+      refreshSheet();
+      return;
+    }
+    let token = h.token;
+    if (!token) {
+      token = await askToken();
+      if (!token) { refreshSheet(); return; }
+    }
+    try {
+      await bridge.enableHosted({ token });
+      toast(`Hosted bridge on — ${host}`, 'ok');
+    } catch (err) {
+      await bridge.configureHosted({ token });
+      toast(err.message, 'err');
+    }
+    refreshSheet();
+  };
+
+  const note = !h.enabled
+    ? `Off. When it is on and the bridge on this machine is off or not answering, ` +
+      `calls to online services go through ${host} instead. Your key and your ` +
+      'messages pass through that server on the way. It keeps none of them, but ' +
+      'it is a server in the middle, which the bridge on your own machine is not. ' +
+      'Endpoints on this machine or network never go that way.'
+    : !h.reachable
+      ? `Nothing answered at ${h.url}. Is this device online?`
+      : h.tokenRefused
+        ? `${host} does not recognise that token.`
+        : !h.health.originAllowed
+          ? `${host} does not accept ${location.origin}.`
+          : s.ready
+            ? `Standing by. The bridge on this machine is answering, so nothing goes through ${host}.`
+            : `On. Calls to online services go through ${host}. Your key and messages ` +
+              'pass through it and are not kept. Endpoints on this machine never go that way.';
+
+  return group('Hosted bridge', [
+    switchRow(`Fall back to ${host}`, h.enabled, toggle),
+    navRow('Token', {
+      value: h.token ? 'Set' : 'None',
+      sub: 'Your ivx/ai token',
+      onclick: async () => {
+        const next = await askToken();
+        if (next === null) return;
+        const after = await bridge.configureHosted({ token: next });
+        if (after.hosted.enabled && !after.hosted.ready) toast('Saved, but the hosted bridge refused it', 'err');
+        refreshSheet();
+      },
+    }),
+    navRow('Address', {
+      value: host,
+      sub: 'Only if you run the ivx/ai API yourself',
+      onclick: async () => {
+        const next = await promptText({
+          title: 'Hosted bridge address',
+          value: h.url,
+          placeholder: bridge.HOSTED_URL,
+        });
+        if (next === null) return;
+        await bridge.configureHosted({ url: next.trim() });
+        refreshSheet();
+      },
+    }),
+    linkRow('Get a token', API_HELP, 'Sign in with a wallet to make one'),
+  ], note);
+}
+
 /** The line under the switch: what is true right now, and what to do about it. */
 function statusNote(s) {
+  if (!s.enabled && s.hosted.ready) {
+    return 'Off. Calls to online services go through the hosted bridge below; ' +
+      'endpoints on this machine go straight from this page.';
+  }
   if (!s.enabled) {
     return bridge.EXTENSION
       ? 'Off. Provider calls go straight from this extension, which works for ' +
@@ -1187,7 +1482,7 @@ function statusNote(s) {
         'for endpoints that allow browser origins.';
   }
   if (!s.reachable) {
-    return `Nothing answered at ${s.url}. Start it with \`ivx-bridge\`, or ` +
+    return `Nothing answered at ${s.url}. Start it with \`ivxai-bridge\`, or ` +
       'turn this off to go direct again.';
   }
   if (!s.health.originAllowed) {
@@ -1386,12 +1681,18 @@ async function exportAll(withKeys) {
       kv.push({ key: 'secrets', value: vault.exportSecrets() });
     } catch (err) { toast(err.message, 'err'); return; }
   }
+  const messages = await store.allMessages();
+  // Attachments are base64 inside the same file. It makes a backup with
+  // pictures in it a big file, and a backup that dropped them would be a
+  // backup of half the chat.
+  const attachments = await attach.exportRecords(messages);
   downloadJSON(`ivx-ai-chat-backup-${new Date().toISOString().slice(0, 10)}.json`, {
     app: 'ivx-ai-chat', version: 1, exportedAt: new Date().toISOString(),
     containsKeys: withKeys,
     conversations: await store.listConversations(),
-    messages: await store.allMessages(),
+    messages,
     kv,
+    ...(attachments.length ? { attachments } : {}),
   });
   toast(withKeys ? 'Exported — this file contains your API keys' : 'Exported', 'ok', 7000);
 }
@@ -1415,9 +1716,11 @@ function importBackup() {
       toast('Nothing recognisable in that file', 'err');
       return;
     }
+    const attachments = attach.restoreRecords(bundle.attachments);
     const ok = await confirmAction({
       title: 'Import this backup?',
       body: `${conversations.length} chats and ${messages.length} messages will be merged in.` +
+        (attachments.length ? ` ${attachments.length} attachments come with them.` : '') +
         (bundle.containsKeys ? ' It also contains API keys.' : ''),
       okText: 'Import',
       danger: false,
@@ -1426,7 +1729,7 @@ function importBackup() {
 
     const secrets = (bundle.kv || []).find(r => r.key === 'secrets')?.value;
     const kv = (bundle.kv || []).filter(r => r.key !== 'secrets' && r.key !== 'vault');
-    await store.importBundle({ conversations, messages, kv });
+    await store.importBundle({ conversations, messages, kv, attachments });
     if (secrets && typeof secrets === 'object') {
       try { await vault.importSecrets(secrets); } catch (err) { toast(err.message, 'err'); }
     }

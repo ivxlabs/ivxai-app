@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 0xcrypto
 
-//! `ivx-bridge` — the standalone daemon.
+//! `ivxai-bridge` — the standalone daemon.
 //!
 //! This is the whole "you do not have to install an app" path: one binary,
 //! a few megabytes, no window, no runtime. Install it, leave it running, and
@@ -16,13 +16,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ivx_bridge::{cors, BoxError, Config, OriginPolicy, OriginRule, State, DEFAULT_PORT};
+use ivxai_bridge::{cors, BoxError, Config, OriginPolicy, OriginRule, State, DEFAULT_PORT};
 
 const USAGE: &str = "\
-ivx-bridge — let a browser reach endpoints that do not speak CORS
+ivxai-bridge — let a browser reach endpoints that do not speak CORS
 
 USAGE
-  ivx-bridge [options]
+  ivxai-bridge [options]
 
 OPTIONS
   -p, --port <port>        Port to listen on (default 8787)
@@ -103,7 +103,7 @@ fn parse_args() -> Result<Option<Args>, BoxError> {
                 return Ok(None);
             }
             "-V" | "--version" => {
-                println!("ivx-bridge {}", ivx_bridge::VERSION);
+                println!("ivxai-bridge {}", ivxai_bridge::VERSION);
                 return Ok(None);
             }
             "-p" | "--port" => args.port = value()?.parse()?,
@@ -150,7 +150,7 @@ fn policy(args: &Args) -> OriginPolicy {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if let Err(err) = run().await {
-        eprintln!("ivx-bridge: {err}");
+        eprintln!("ivxai-bridge: {err}");
         std::process::exit(1);
     }
 }
@@ -178,13 +178,13 @@ async fn run() -> Result<(), BoxError> {
     }
     if args.any_origin {
         eprintln!(
-            "ivx-bridge: --allow-any-origin means any page in your browser can use this \
+            "ivxai-bridge: --allow-any-origin means any page in your browser can use this \
              bridge to reach your network. Development only."
         );
     }
     if !args.host.is_loopback() && args.token.is_none() {
         eprintln!(
-            "ivx-bridge: binding {} exposes the bridge beyond this machine. Use --token \
+            "ivxai-bridge: binding {} exposes the bridge beyond this machine. Use --token \
              unless you are certain.",
             args.host
         );
@@ -208,7 +208,7 @@ async fn run() -> Result<(), BoxError> {
         }
     })?;
 
-    println!("ivx-bridge {} on http://{addr}", ivx_bridge::VERSION);
+    println!("ivxai-bridge {} on http://{addr}", ivxai_bridge::VERSION);
     println!("  accepting: {}", config.origins.describe());
     if config.token.is_some() {
         println!("  token:     required");
@@ -222,7 +222,7 @@ async fn run() -> Result<(), BoxError> {
 
     let state = Arc::new(State::new(config)?);
     tokio::select! {
-        result = ivx_bridge::serve(listener, state) => result,
+        result = ivxai_bridge::serve(listener, state) => result,
         _ = tokio::signal::ctrl_c() => {
             println!("\nstopped");
             Ok(())
@@ -311,8 +311,8 @@ mod service {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>{log}/ivx-bridge.log</string>
-  <key>StandardErrorPath</key><string>{log}/ivx-bridge.log</string>
+  <key>StandardOutPath</key><string>{log}/ivxai-bridge.log</string>
+  <key>StandardErrorPath</key><string>{log}/ivxai-bridge.log</string>
 </dict>
 </plist>
 "#,
@@ -330,7 +330,7 @@ mod service {
         run("launchctl", &["bootstrap", target.as_str(), plist.as_str()])?;
 
         println!("Installed {}", path.display());
-        println!("Logs: {}/ivx-bridge.log", logs.display());
+        println!("Logs: {}/ivxai-bridge.log", logs.display());
         println!("Running now, and again at every login.");
         Ok(())
     }
@@ -367,7 +367,7 @@ mod service {
 
     #[cfg(target_os = "linux")]
     fn unit_path() -> Result<PathBuf, BoxError> {
-        Ok(home()?.join(".config/systemd/user/ivx-bridge.service"))
+        Ok(home()?.join(".config/systemd/user/ivxai-bridge.service"))
     }
 
     #[cfg(target_os = "linux")]
@@ -398,16 +398,16 @@ mod service {
         )?;
 
         run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", "ivx-bridge"])?;
+        run("systemctl", &["--user", "enable", "--now", "ivxai-bridge"])?;
         println!("Installed {}", path.display());
-        println!("Logs: journalctl --user -u ivx-bridge -f");
+        println!("Logs: journalctl --user -u ivxai-bridge -f");
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     pub fn uninstall() -> Result<(), BoxError> {
         let path = unit_path()?;
-        let _ = run("systemctl", &["--user", "disable", "--now", "ivx-bridge"]);
+        let _ = run("systemctl", &["--user", "disable", "--now", "ivxai-bridge"]);
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -430,7 +430,7 @@ mod service {
     fn unsupported() -> BoxError {
         "--install-service only knows launchd and systemd. On Windows, run \
          `schtasks /create /tn IvxAiBridge /sc onlogon /tr \"<path to \
-         ivx-bridge.exe>\"`, or drop a shortcut in shell:startup."
+         ivxai-bridge.exe>\"`, or drop a shortcut in shell:startup."
             .into()
     }
 }

@@ -14,7 +14,7 @@
 //
 // What is deliberately NOT managed here:
 //
-//   crates/ivx-bridge, packaging/homebrew/ivx-bridge.rb
+//   crates/ivxai-bridge, packaging/homebrew/ivxai-bridge.rb
 //     The bridge is a different program with a different job. Giving it the
 //     chat client's tagline would be wrong, not consistent.
 //

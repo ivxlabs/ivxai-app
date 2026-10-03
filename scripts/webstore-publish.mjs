@@ -5,17 +5,22 @@
 // Uploads the built Chrome extension to the Chrome Web Store, and optionally
 // submits it for review.
 //
-//   node scripts/webstore-publish.mjs <zip>            upload as a draft
-//   node scripts/webstore-publish.mjs <zip> --publish  ...and submit it
-//   node scripts/webstore-publish.mjs <zip> --publish --target trustedTesters
+//   node scripts/webstore-publish.mjs <zip>                     upload as a draft
+//   node scripts/webstore-publish.mjs <zip> --publish           ...and submit it
+//   node scripts/webstore-publish.mjs <zip> --publish --staged  ...but hold it
+//                                                               once approved
 //
-// Four things have to be in the environment, all of them from the one-time
-// setup in scripts/webstore-auth.mjs:
+// Three things have to be in the environment, all from the one-time setup in
+// packaging/extension/README.md:
 //
-//   WEBSTORE_CLIENT_ID       OAuth client, "Desktop app" type
-//   WEBSTORE_CLIENT_SECRET
-//   WEBSTORE_REFRESH_TOKEN   what webstore-auth.mjs prints
-//   WEBSTORE_ITEM_ID         the 32-letter id in the dashboard URL
+//   WEBSTORE_SERVICE_ACCOUNT  the service account's JSON key — its contents,
+//                             or a path to the file when running by hand
+//   WEBSTORE_PUBLISHER_ID     Publisher → Settings in the developer dashboard
+//   WEBSTORE_ITEM_ID          the 32-letter id in the item's store URL
+//
+// This is the v2 API. v1.1 stops answering on 15 October 2026, and v2 is also
+// the one that takes a service account: a machine identity with no consent
+// screen and no refresh token to expire, which is what a release job wants.
 //
 // The store is not a file host: uploading replaces the draft of an item that
 // already exists, so the first version has to go up by hand — that is the one
@@ -25,13 +30,13 @@
 // Publishing does not make anything live. It submits for review, which takes
 // anywhere from an hour to a week, and the store decides.
 
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, existsSync } from 'node:fs';
 import { basename } from 'node:path';
+import { createSign } from 'node:crypto';
 
-const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const UPLOAD_URL = id => `https://www.googleapis.com/upload/chromewebstore/v1.1/items/${id}`;
-const PUBLISH_URL = (id, target) =>
-  `https://www.googleapis.com/chromewebstore/v1.1/items/${id}/publish?publishTarget=${target}`;
+const SCOPE = 'https://www.googleapis.com/auth/chromewebstore';
+const API = 'https://chromewebstore.googleapis.com';
+const item = (publisher, id) => `publishers/${publisher}/items/${id}`;
 
 const die = msg => { console.error(`webstore: ${msg}`); process.exit(1); };
 const log = msg => console.log(`webstore: ${msg}`);
@@ -41,13 +46,9 @@ const log = msg => console.log(`webstore: ${msg}`);
 const args = process.argv.slice(2);
 const zipPath = args.find(a => !a.startsWith('--'));
 const shouldPublish = args.includes('--publish');
-const targetArg = args.indexOf('--target');
-const target = targetArg === -1 ? 'default' : args[targetArg + 1];
+const staged = args.includes('--staged');
 
 if (!zipPath) die('give me the zip to upload');
-if (!['default', 'trustedTesters'].includes(target)) {
-  die(`--target is "default" or "trustedTesters", not "${target}"`);
-}
 try {
   if (!statSync(zipPath).isFile()) die(`${zipPath} is not a file`);
 } catch {
@@ -55,76 +56,89 @@ try {
 }
 
 const env = name => {
-  const value = process.env[name];
+  const value = process.env[name]?.trim();
   if (!value) die(`${name} is not set — see packaging/extension/README.md`);
   return value;
 };
-const clientId = env('WEBSTORE_CLIENT_ID');
-const clientSecret = env('WEBSTORE_CLIENT_SECRET');
-const refreshToken = env('WEBSTORE_REFRESH_TOKEN');
-const itemId = env('WEBSTORE_ITEM_ID');
+const key = serviceAccount(env('WEBSTORE_SERVICE_ACCOUNT'));
+const name = item(env('WEBSTORE_PUBLISHER_ID'), env('WEBSTORE_ITEM_ID'));
+
+/** The JSON key, whether it came as the secret's contents or as a path. */
+function serviceAccount(value) {
+  const text = value.startsWith('{') ? value
+    : existsSync(value) ? readFileSync(value, 'utf8')
+    : die('WEBSTORE_SERVICE_ACCOUNT is neither JSON nor a file that exists');
+  let json;
+  try { json = JSON.parse(text); } catch { die('WEBSTORE_SERVICE_ACCOUNT is not valid JSON'); }
+  if (json.type !== 'service_account' || !json.client_email || !json.private_key) {
+    die('WEBSTORE_SERVICE_ACCOUNT is not a service account key — create one under ' +
+      'IAM & Admin → Service Accounts → Keys → Add key → JSON');
+  }
+  return json;
+}
 
 /* ── talking to the store ──────────────────────────────────── */
 
 /**
- * Trade the long-lived refresh token for an access token.
+ * Sign a JWT with the service account's key and trade it for an access token.
  *
- * `invalid_grant` here is almost always one thing, and it is not a typo in the
- * secret: a Google Cloud OAuth consent screen left in "Testing" issues refresh
- * tokens that stop working after seven days. Publishing the consent screen, or
- * making it Internal, is the fix, and it is worth saying out loud because the
- * error does not.
+ * Done by hand rather than through google-auth-library: it is one signature
+ * and one POST, and not worth a dependency for a script that runs per release.
  */
 async function accessToken() {
-  const res = await fetch(TOKEN_URL, {
+  const b64 = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const now = Math.floor(Date.now() / 1000);
+  const tokenUrl = key.token_uri || 'https://oauth2.googleapis.com/token';
+  const unsigned = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({
+    iss: key.client_email,
+    scope: SCOPE,
+    aud: tokenUrl,
+    iat: now,
+    exp: now + 600,
+  })}`;
+  const signature = createSign('RSA-SHA256').update(unsigned).sign(key.private_key, 'base64url');
+
+  const res = await fetch(tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken,
-      grant_type: 'refresh_token',
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: `${unsigned}.${signature}`,
     }),
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (json.error === 'invalid_grant') {
-      die('the refresh token was refused (invalid_grant). If the OAuth consent ' +
-        'screen is still in "Testing", its refresh tokens expire after 7 days — ' +
-        'publish the consent screen, then run `npm run ext:auth` again.');
-    }
-    die(`could not get an access token: ${json.error_description || json.error || res.status}`);
+    // A deleted or disabled key, most likely; the account itself rarely goes.
+    die(`could not sign in as ${key.client_email}: ` +
+      `${json.error_description || json.error || res.status}`);
   }
   return json.access_token;
 }
 
-async function upload(token) {
-  const zip = readFileSync(zipPath);
-  log(`uploading ${basename(zipPath)} (${(zip.length / 1024 / 1024).toFixed(1)} MB) to ${itemId}`);
-
-  const res = await fetch(UPLOAD_URL(itemId), {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-goog-api-version': '2',
-      'Content-Type': 'application/zip',
-    },
-    body: zip,
+/** One call to the store, with its error made readable. */
+async function call(token, path, { method = 'POST', body, headers = {} } = {}) {
+  const res = await fetch(`${API}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...headers },
+    body,
   });
   const json = await res.json().catch(() => ({}));
-
-  // A rejected upload still answers 200; uploadState is the real verdict.
-  if (!res.ok || json.uploadState === 'FAILURE') {
-    const errors = (json.itemError || []).map(e => e.error_detail || e.error_code).join('; ');
-    // By far the most common one, and the message for it is opaque.
-    if (/already exists|same version|not_updatable/i.test(errors)) {
+  if (!res.ok) {
+    const message = json.error?.message || JSON.stringify(json) || String(res.status);
+    // The two that need explaining. Both come back as a bare 403 or 404.
+    if (res.status === 403 || res.status === 404) {
+      die(`${message}\n  The store refused ${key.client_email} for ${name}. Check that ` +
+        'this service account is added under Account in the developer dashboard, and ' +
+        'that WEBSTORE_PUBLISHER_ID and WEBSTORE_ITEM_ID are right.');
+    }
+    if (/already exists|same version|version.*(greater|higher)/i.test(message)) {
       const version = versionOf();
       die(`the store already has ${version ? `version ${version}` : 'this version'} ` +
         'of this item. Bump it with `npm run bump patch`, rebuild, and tag again.');
     }
-    die(`upload failed: ${errors || JSON.stringify(json) || res.status}`);
+    die(message);
   }
-  log(`uploaded, state ${json.uploadState}`);
+  return json;
 }
 
 /**
@@ -139,29 +153,36 @@ function versionOf() {
   return m ? m[1] : null;
 }
 
-async function publish(token) {
-  log(`submitting for review (${target})`);
-  const res = await fetch(PUBLISH_URL(itemId, target), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-goog-api-version': '2',
-      'Content-Length': '0',
-    },
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    die(`publish failed: ${(json.error?.message) || JSON.stringify(json) || res.status}`);
-  }
-  const status = (json.status || []).join(', ');
-  const detail = (json.statusDetail || []).join('; ');
+async function upload(token) {
+  const zip = readFileSync(zipPath);
+  log(`uploading ${basename(zipPath)} (${(zip.length / 1024 / 1024).toFixed(1)} MB) to ${name}`);
 
-  // Not an error: the store says this when a listing is incomplete, and it is
-  // better to fail the release than to report a submission that never happened.
-  if (status && !/OK/i.test(status)) {
-    die(`the store did not accept it — ${status}${detail ? `: ${detail}` : ''}`);
+  let { uploadState: state, crxVersion } = await call(token, `/upload/v2/${name}:upload`, {
+    body: zip,
+    headers: { 'Content-Type': 'application/zip' },
+  });
+
+  // The store may take the package and check it afterwards; wait it out
+  // rather than submit something that is about to be refused.
+  for (let tries = 0; state === 'IN_PROGRESS'; tries++) {
+    if (tries === 30) die('the upload was still being processed after five minutes');
+    await new Promise(r => setTimeout(r, 10_000));
+    state = (await call(token, `/v2/${name}:fetchStatus`, { method: 'GET' })).lastAsyncUploadState;
   }
-  log(`submitted${detail ? `: ${detail}` : ''}`);
+  if (state !== 'SUCCEEDED') die(`upload failed, state ${state}`);
+  log(`uploaded${crxVersion ? ` version ${crxVersion}` : ''}`);
+}
+
+async function publish(token) {
+  log(`submitting for review${staged ? ', to be held once approved' : ''}`);
+  const json = await call(token, `/v2/${name}:publish`, {
+    body: JSON.stringify({ publishType: staged ? 'STAGED_PUBLISH' : 'DEFAULT_PUBLISH' }),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  for (const w of json.warningInfo ? [].concat(json.warningInfo) : []) {
+    console.warn(`webstore: warning: ${w.description || w.reason || JSON.stringify(w)}`);
+  }
+  log(`submitted, state ${json.state}`);
   log('review takes anywhere from an hour to a week; the store decides when it goes live');
 }
 

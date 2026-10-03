@@ -53,7 +53,7 @@ jobs:
 
             | You want | Download |
             | --- | --- |
-            | Just the CORS bypass, no app | `ivx-bridge-*` for your platform |
+            | Just the CORS bypass, no app | `ivxai-bridge-*` for your platform |
             | macOS | `*-macos-universal.dmg`, or the `.app.tar.gz` |
             | Windows | `*-windows-x86_64-setup.exe` |
             | Linux | `*.AppImage` or `*.deb` |
@@ -127,29 +127,29 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: |
           set -eu
-          cargo build --release -p ivx-bridge --target aarch64-apple-darwin
-          cargo build --release -p ivx-bridge --target x86_64-apple-darwin
+          cargo build --release -p ivxai-bridge --target aarch64-apple-darwin
+          cargo build --release -p ivxai-bridge --target x86_64-apple-darwin
           mkdir -p dist bridge
           cp README.md LICENSE bridge/
-          lipo -create -output bridge/ivx-bridge \
-            target/aarch64-apple-darwin/release/ivx-bridge \
-            target/x86_64-apple-darwin/release/ivx-bridge
-          tar -czf "dist/ivx-bridge-$TAG-macos-universal.tar.gz" -C bridge .
+          lipo -create -output bridge/ivxai-bridge \
+            target/aarch64-apple-darwin/release/ivxai-bridge \
+            target/x86_64-apple-darwin/release/ivxai-bridge
+          tar -czf "dist/ivxai-bridge-$TAG-macos-universal.tar.gz" -C bridge .
 
       - name: Bridge (Windows and Linux)
         if: matrix.os != 'macos-latest'
         shell: bash
         run: |
           set -eu
-          cargo build --release -p ivx-bridge --target ${{ matrix.rust_targets }}
+          cargo build --release -p ivxai-bridge --target ${{ matrix.rust_targets }}
           mkdir -p dist bridge
           cp README.md LICENSE bridge/
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/${{ matrix.rust_targets }}/release/ivx-bridge.exe bridge/
+            cp target/${{ matrix.rust_targets }}/release/ivxai-bridge.exe bridge/
           else
-            cp target/${{ matrix.rust_targets }}/release/ivx-bridge bridge/
+            cp target/${{ matrix.rust_targets }}/release/ivxai-bridge bridge/
           fi
-          tar -czf "dist/ivx-bridge-$TAG-${{ matrix.name }}.tar.gz" -C bridge .
+          tar -czf "dist/ivxai-bridge-$TAG-${{ matrix.name }}.tar.gz" -C bridge .
 
       # Bundles land in the workspace target/, not src-tauri/target/.
       - name: App (macOS)
@@ -208,10 +208,11 @@ jobs:
     # Lifted to the job so the publish step can ask whether they are set. A
     # step's `if` cannot read `secrets`, and cannot see its own `env` either.
     env:
-      WEBSTORE_CLIENT_ID: ${{ secrets.WEBSTORE_CLIENT_ID }}
-      WEBSTORE_CLIENT_SECRET: ${{ secrets.WEBSTORE_CLIENT_SECRET }}
-      WEBSTORE_REFRESH_TOKEN: ${{ secrets.WEBSTORE_REFRESH_TOKEN }}
+      WEBSTORE_SERVICE_ACCOUNT: ${{ secrets.WEBSTORE_SERVICE_ACCOUNT }}
+      WEBSTORE_PUBLISHER_ID: ${{ secrets.WEBSTORE_PUBLISHER_ID }}
       WEBSTORE_ITEM_ID: ${{ secrets.WEBSTORE_ITEM_ID }}
+      AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+      AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -236,9 +237,9 @@ jobs:
 
       # Only with the secrets set, so a fork or a first-time clone still gets a
       # green release with the zips attached. See packaging/extension/README.md
-      # for where these four come from.
+      # for where these three come from.
       - name: Publish to the Chrome Web Store
-        if: ${{ env.WEBSTORE_ITEM_ID != '' }}
+        if: ${{ env.WEBSTORE_SERVICE_ACCOUNT != '' }}
         run: |
           set -eu
           # Globbed rather than spelled out from the tag: the name comes from
@@ -247,6 +248,17 @@ jobs:
           set -- packaging/extension/build/ivxai-chat-*-chrome.zip
           [ $# -eq 1 ] && [ -f "$1" ] || { echo "expected exactly one chrome zip, got $#"; exit 1; }
           node scripts/webstore-publish.mjs "$1" --publish
+
+      # Same rule as above: no secrets, no step. Not held up by the Chrome step
+      # failing either — the two stores have nothing to do with each other. The
+      # script sends the source along, as `git archive HEAD` of the tag.
+      - name: Publish to addons.mozilla.org
+        if: ${{ !cancelled() && env.AMO_JWT_SECRET != '' }}
+        run: |
+          set -eu
+          set -- packaging/extension/build/ivxai-chat-*-firefox.zip
+          [ $# -eq 1 ] && [ -f "$1" ] || { echo "expected exactly one firefox zip, got $#"; exit 1; }
+          node scripts/amo-publish.mjs "$1"
 
   # Kept apart from the desktop matrix: this one needs a JDK, the Android SDK
   # and an NDK, builds the Rust library once per ABI rather than once, and is
@@ -370,6 +382,24 @@ jobs:
           fi
           echo "versionCode $BUILT, as expected"
 
+          # With a key configured, every APK has to come out signed by it. A
+          # secret that was pasted wrong otherwise ships APKs no phone will
+          # install, and the only sign of it is a filename ending -unsigned.
+          if [ -n "${ANDROID_KEYSTORE_FILE:-}" ]; then
+            APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | tail -1)
+            find "$OUT/apk" -name '*.apk' | while read -r apk; do
+              "$APKSIGNER" verify "$apk" >/dev/null || { echo "::error::$apk is not signed"; exit 1; }
+            done
+            # The certificate fingerprint is what lets someone check a download
+            # is ours, and what Obtainium and AppVerifier pin. It only changes
+            # if the key does, which it must not.
+            FINGERPRINT=$("$APKSIGNER" verify --print-certs "$OUT/apk/universal/release/"*.apk \
+              | sed -n 's/.*certificate SHA-256 digest: //p' | head -1)
+            echo "signed, certificate SHA-256 $FINGERPRINT"
+            echo "Android signing certificate SHA-256: \`$FINGERPRINT\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "ANDROID_CERT_SHA256=$FINGERPRINT" >> "$GITHUB_ENV"
+          fi
+
           mkdir -p dist
           # Signed or not, the file is the deliverable; only its name differs,
           # so take whatever is in the directory rather than spelling it out.
@@ -402,3 +432,15 @@ jobs:
           set -eu
           [ -n "$(ls -A dist)" ] || { echo "nothing was built"; exit 1; }
           gh release upload "$TAG" dist/* --clobber
+
+          # Under the signing note, once: a re-run must not add it twice.
+          if [ -n "${ANDROID_CERT_SHA256:-}" ]; then
+            BODY=$(gh release view "$TAG" --json body -q .body)
+            case "$BODY" in *"$ANDROID_CERT_SHA256"*) exit 0 ;; esac
+            {
+              printf '%s\n\n' "$BODY"
+              printf 'The Android signing certificate SHA-256 is `%s`.\n' "$ANDROID_CERT_SHA256"
+              printf '`apksigner verify --print-certs` on a download should show the same.\n'
+            } > notes.md
+            gh release edit "$TAG" --notes-file notes.md
+          fi

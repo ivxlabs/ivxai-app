@@ -1,0 +1,42 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
+     Copyright (C) 2026 0xcrypto
+
+     Where an MCP server's authorization page sends the browser back to.
+
+     This page exists because an authorization server will only redirect to an
+     address it was registered with, and "the tab the app happens to be in" is
+     not an address. So the app opens this in a popup, the server redirects
+     here with the code, and this hands it back to the window that opened it
+     and closes. Nothing is stored here and nothing is sent anywhere: the only
+     recipient is the opener, at this same origin.
+
+     The extension does not use this — it has the browser's own redirect
+     address through `identity.launchWebAuthFlow`. See web/src/mcp-oauth.js. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex">
+    <title>Signing in…</title>
+    <style>
+      body {
+        margin: 0; min-height: 100vh;
+        display: grid; place-items: center;
+        padding: 2rem;
+        font: 400 .9375rem/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #0f1013; color: #e9eaee;
+      }
+      main { max-width: 26rem; text-align: center; }
+      h1 { font-size: 1.0625rem; font-weight: 600; margin: 0 0 .5rem; }
+      p { margin: 0; color: #a7a9b4; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">Signing in…</h1>
+      <p id="detail">You can close this window.</p>
+    </main>
+    <script src="oauth.js"></script>
+  </body>
+</html>

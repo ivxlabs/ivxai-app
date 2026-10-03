@@ -1,7 +1,7 @@
 {
   "name": "ivx-ai-chat",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.3.0",
   "type": "module",
   "description": "A lightweight, browser-based chat client designed for users who want total control over their data and their AI interactions.",
   "license": "GPL-3.0-or-later",
@@ -16,6 +16,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "mock": "node tools/mock-provider.mjs",
+    "mock:mcp": "node tools/mock-mcp-oauth.mjs",
     "icons": "node tools/make-icons.mjs",
     "check": "node tools/check-imports.mjs"
   },

@@ -377,23 +377,28 @@ body {
 }
 .tool-ask-answer { white-space: pre-wrap; }
 
-/* Meta and actions stay hidden until a message is tapped. */
+/* Meta and actions stay hidden until a message is tapped. The foot keeps its
+   height either way, so tapping never reflows the thread: a message stays
+   exactly where the finger left it. */
 .msg-foot {
-  display: none;
-  align-items: center; gap: .125rem;
-  margin-top: .375rem;
+  display: flex; align-items: center; gap: .125rem;
+  height: 2rem; margin: .25rem 0 -1rem;   /* borrows most of the thread gap */
+  visibility: hidden;
 }
-.msg.is-open .msg-foot { display: flex; flex-wrap: wrap; }
+.msg.is-open .msg-foot { visibility: visible; }
 .msg-meta {
-  margin-right: auto;
+  margin-right: auto; min-width: 0;
   font-size: .75rem; color: var(--bs-secondary-color);
   padding-right: .5rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .msg-action {
-  min-height: 2.25rem; padding: 0 .75rem;
+  flex: 0 0 auto;
+  display: inline-grid; place-items: center;
+  width: 2rem; height: 2rem; padding: 0;
   border: 0; border-radius: .5rem;
   background: transparent; color: var(--bs-secondary-color);
-  font-size: .8125rem;
+  font-size: 1rem; line-height: 1;
 }
 .msg-action:hover { background-color: var(--bs-tertiary-bg); color: var(--bs-body-color); }
 .msg-action.danger { color: var(--bs-danger); }
@@ -442,12 +447,184 @@ body {
   box-shadow: 0 .25rem .75rem var(--n-shadow);
 }
 
+/* ── Attachments ───────────────────────────────────────────
+
+   Two places, one look: chips in the tray while a file waits to be sent, and
+   cards under a message once it has been. A picture shows itself; everything
+   else shows its own icon, its name and its size, because that is all there
+   is to show about a zip. */
+
+.att-grid {
+  display: flex; flex-wrap: wrap; gap: .5rem;
+  margin-bottom: .5rem;
+}
+.bubble > .att-grid:last-child { margin-bottom: 0; }
+.bubble-text { white-space: pre-wrap; }
+
+.att-card {
+  display: flex; align-items: center; gap: .5rem;
+  max-width: 100%;
+  padding: 0; border: 1px solid var(--bs-border-color); border-radius: .75rem;
+  background-color: var(--bs-body-bg); color: var(--bs-body-color);
+  overflow: hidden; text-align: left;
+}
+.att-file { padding: .5rem .75rem; }
+.att-file:hover, .att-media:hover { border-color: var(--n-500); }
+.att-media { flex-direction: column; align-items: stretch; gap: 0; }
+
+.att-image {
+  display: block;
+  max-width: min(18rem, 100%); max-height: 18rem;
+  width: auto; height: auto;
+  object-fit: cover; background-color: var(--bs-secondary-bg);
+}
+.att-video { display: block; max-width: min(22rem, 100%); max-height: 16rem; background-color: #000; }
+.att-audio { display: block; width: min(18rem, 100%); }
+
+.att-media .att-line { padding: .375rem .625rem; }
+.att-line { display: flex; flex-direction: column; min-width: 0; }
+.att-name {
+  font-size: .875rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 14rem;
+}
+.att-size { font-size: .75rem; color: var(--bs-secondary-color); }
+.att-icon { font-size: 1.25rem; color: var(--bs-secondary-color); }
+.att-missing { border-style: dashed; color: var(--bs-secondary-color); padding: .5rem .75rem; }
+
+/* The full-size look at a picture, on the sheet. */
+.att-view { display: flex; flex-direction: column; gap: .75rem; align-items: center; }
+.att-view-image {
+  max-width: 100%; max-height: 60dvh;
+  border-radius: .75rem; object-fit: contain;
+}
+
+/* ── the composer's tray ───────────────────────────────────── */
+
+.attach-tray {
+  display: flex; flex-wrap: wrap; gap: .375rem;
+  margin-bottom: .5rem;
+}
+.attach-chip {
+  display: inline-flex; align-items: center; gap: .5rem;
+  max-width: 100%;
+  padding: .25rem .25rem .25rem .5rem;
+  border: 1px solid var(--bs-border-color); border-radius: .75rem;
+  background-color: var(--bs-secondary-bg);
+}
+.attach-chip-thumb {
+  width: 2rem; height: 2rem; border-radius: .5rem; object-fit: cover;
+  background-color: var(--bs-tertiary-bg);
+}
+.attach-chip-icon {
+  width: 2rem; height: 2rem;
+  display: grid; place-items: center;
+  border-radius: .5rem; background-color: var(--bs-tertiary-bg);
+  color: var(--bs-secondary-color); font-size: 1rem;
+}
+.attach-chip-text { display: flex; flex-direction: column; min-width: 0; }
+.attach-chip-name {
+  font-size: .8125rem; max-width: 11rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.attach-chip-size { font-size: .6875rem; color: var(--bs-secondary-color); }
+.attach-chip-x {
+  flex: 0 0 auto;
+  width: 1.75rem; height: 1.75rem;
+  display: grid; place-items: center;
+  border: 0; border-radius: 50%;
+  background: transparent; color: var(--bs-secondary-color); font-size: .875rem;
+}
+.attach-chip-x:hover { background-color: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+
+/* What a message named with `@`, above its text. Quieter than the text it
+   belongs to: it is what the question was about, not part of the question. */
+.msg-mentions { display: flex; flex-wrap: wrap; gap: .25rem; margin-bottom: .375rem; }
+.msg-mention {
+  display: inline-flex; align-items: center; gap: .25rem; max-width: 100%;
+  padding: .0625rem .5rem;
+  border-radius: 1rem;
+  background-color: var(--bs-tertiary-bg); color: var(--bs-secondary-color);
+  font-size: .75rem;
+}
+.msg-mention > span:last-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Matches .send-btn's footprint so the row stays symmetrical, without its
+   filled circle: attaching is an aside, sending is the action. */
+.attach-btn {
+  flex: 0 0 auto;
+  display: grid; place-items: center;
+  width: var(--tap); height: var(--tap);
+  margin-left: -.5rem;
+  border: 0; border-radius: 50%;
+  background: transparent; color: var(--bs-secondary-color);
+  font-size: 1.125rem; line-height: 1;
+}
+.attach-btn:hover { background-color: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+
+/* Dropping a file anywhere over the chat attaches it, so the whole pane is
+   what lights up — a small target would be a worse promise than the truth. */
+.main.is-dropping::after {
+  content: 'Drop to attach';
+  position: absolute; inset: 0; z-index: 3;
+  display: grid; place-items: center;
+  margin: .5rem; border: 2px dashed var(--n-500); border-radius: 1rem;
+  background-color: color-mix(in srgb, var(--bs-body-bg) 82%, transparent);
+  color: var(--bs-body-color); font-size: .9375rem;
+  pointer-events: none;
+}
+
 /* ── Composer ──────────────────────────────────────────────── */
 
 .composer {
+  position: relative;          /* the mention menu hangs off this */
   border-top: 1px solid var(--bs-border-color);
   background-color: var(--bs-body-bg);
   padding: .5rem var(--gutter) calc(.5rem + var(--safe-bottom));
+}
+
+/* ── the mention menu ──────────────────────────────────────────
+
+   Above the composer rather than below it: the composer is already at the
+   bottom of the window, and a menu that opened downwards would open into the
+   keyboard on a phone. */
+.mention-menu {
+  position: absolute; z-index: 5;
+  left: var(--gutter); right: var(--gutter); bottom: calc(100% - 1px);
+  max-height: 15rem; overflow-y: auto;
+  padding: .25rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: .75rem .75rem 0 0;
+  background-color: var(--bs-body-bg);
+  box-shadow: 0 -.5rem 1.75rem rgb(0 0 0 / .18);
+}
+.mention-item {
+  display: flex; align-items: center; gap: .625rem; width: 100%;
+  padding: .4375rem .5rem;
+  border: 0; border-radius: .5rem;
+  background: transparent; color: var(--bs-body-color); text-align: left;
+}
+.mention-item[aria-selected="true"] { background-color: var(--bs-secondary-bg); }
+.mention-icon {
+  flex: 0 0 auto;
+  width: 1.75rem; height: 1.75rem;
+  display: grid; place-items: center;
+  border-radius: .5rem; background-color: var(--bs-tertiary-bg);
+  color: var(--bs-secondary-color); font-size: .875rem;
+}
+.mention-text { display: flex; flex-direction: column; min-width: 0; }
+.mention-name {
+  font-size: .875rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mention-sub {
+  font-size: .6875rem; color: var(--bs-secondary-color);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mention-empty {
+  padding: .625rem .5rem;
+  font-size: .8125rem; color: var(--bs-secondary-color);
 }
 .composer > * { max-width: var(--measure); margin-inline: auto; }
 
@@ -745,6 +922,47 @@ a.item { text-decoration: none; color: var(--bs-body-color); }
 }
 .snack-ask-x:hover { opacity: 1; }
 @keyframes snack-in { from { opacity: 0; transform: translateY(.5rem); } }
+
+/* ── Right-click menu ──────────────────────────────────────── */
+
+/* Above the drawer and the scrim, below the toasts: a toast can report what
+   the menu just did. It never shares the screen with a sheet — the sheet is
+   modal, so the menu is not offered while one is open. */
+.ctx-menu {
+  position: fixed; z-index: 50;
+  min-width: 11rem; max-width: min(18rem, calc(100vw - 2rem));
+  max-height: min(70dvh, 30rem); overflow-y: auto;
+  padding: .3125rem;
+  border: 1px solid var(--bs-border-color); border-radius: .75rem;
+  background-color: var(--bs-body-bg);
+  box-shadow: 0 .625rem 2rem var(--n-shadow);
+  animation: ctx-in .12s ease;
+}
+.ctx-menu:focus { outline: none; }
+.ctx-heading {
+  padding: .3125rem .5rem .375rem;
+  font-size: .6875rem; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--bs-tertiary-color);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ctx-item {
+  display: flex; align-items: center; gap: .75rem;
+  width: 100%; min-height: 2.125rem;
+  padding: .375rem .5rem;
+  border: 0; border-radius: .5rem;
+  background: transparent; color: var(--bs-body-color);
+  font: inherit; font-size: .875rem; text-align: left; cursor: pointer;
+}
+.ctx-item:hover:not(:disabled),
+.ctx-item:focus-visible { background-color: var(--bs-secondary-bg); outline: none; }
+.ctx-item:disabled { color: var(--bs-tertiary-color); cursor: default; }
+.ctx-item.danger { color: var(--bs-danger); }
+.ctx-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-hint { flex: 0 0 auto; font-size: .75rem; color: var(--bs-tertiary-color); }
+.ctx-sep { height: 1px; margin: .3125rem .25rem; background-color: var(--bs-border-color); }
+
+@keyframes ctx-in { from { opacity: 0; transform: scale(.97); } }
+@media (prefers-reduced-motion: reduce) { .ctx-menu { animation: none; } }
 
 /* ── Wider screens ─────────────────────────────────────────── */
 

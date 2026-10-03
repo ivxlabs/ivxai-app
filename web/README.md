@@ -80,7 +80,7 @@ machine.
 If a service does not publish a model list, choose **Type a model name**
 instead. Names you type are remembered.
 
-## The helper: ivx-bridge
+## The helper: ivxai-bridge
 
 Browsers do not let a web page talk to programs on your own computer, and many
 online services refuse calls that come from a web page. Without the helper,
@@ -96,7 +96,7 @@ A couple of cases can be fixed at the source instead:
 For everything else, run the helper that comes with the installable apps:
 
 ```sh
-ivx-bridge
+ivxai-bridge
 ```
 
 Then **Settings → CORS bypass → Look for the bridge**. It is off until you turn
@@ -117,6 +117,16 @@ every chat using it. An agent can also ask another agent for help mid-answer.
 runs as a program on your own machine goes through the bridge, since a browser
 cannot start a program. You choose which agents get which tools.
 
+A hosted MCP server that signs you in rather than handing you a token — Notion,
+Linear and most of the others — is added by pasting the same one-line config
+its own setup page shows you, and then pressing **Sign in**. A window opens, you
+approve it there, and the token comes back here. This app registers itself with
+that server at that moment, from your browser: there is no developer account of
+ours in the middle, because there is nothing of ours in the middle of anything.
+The token is kept with your API keys — encrypted at rest as soon as you set a
+passphrase — and refreshes itself. A server that issues tokens by hand still
+takes one in the Bearer token field.
+
 The **Store** installs services, agents, tools and skills that other people have
 written down. Entries are settings, never code, and installing one still asks
 first.
@@ -136,6 +146,10 @@ the passphrase and the keys are gone, with no way back.
   history to send.
 - **Message actions**: copy, edit and run again from that point, retry, delete.
 - **Chat actions**: rename, duplicate, archive, save as a file.
+- **Right-click anything**: a message, a code block, a link, an attachment, a
+  chat in the list — the menu holds what that one thing can do. Holding Shift
+  gets the browser's own menu back, and anywhere you type keeps it anyway, so
+  spelling suggestions and paste are never taken away.
 - **Share link**: the chat travels inside the link itself, so no server holds a
   copy.
 - **Backup**: export everything, keys included only if you tick the box.

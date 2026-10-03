@@ -36,6 +36,19 @@ export const PRESETS = [
   { key: 'localai',    name: 'LocalAI',           kind: 'openai',    baseUrl: 'http://localhost:8081/v1', needsKey: false, local: true },
   { key: 'textgen',    name: 'Text generation WebUI', kind: 'openai', baseUrl: 'http://localhost:5000/v1', needsKey: false, local: true },
 
+  // No key and no machine to run a model on: Cloudflare Workers AI, run by us.
+  // It answers browsers itself, so it needs no bridge — but it is our server,
+  // and the hint says so.
+  { key: 'ivxai',      name: 'ivx/ai (Workers AI)', kind: 'openai',  baseUrl: 'https://api.ivx.run/ai/v1', needsKey: true,
+    defaultModel: '@cf/openai/gpt-oss-20b', models: ['@cf/openai/gpt-oss-20b'],
+    hint: 'Open models on Cloudflare Workers AI, served by the ivx/ai API. The key is your ivx/ai token. Messages go through our server to Cloudflare and are not kept.' },
+  // Other people's keys, from any provider in the ivx/ai pool, paid for with
+  // credit earned by lending your own or redeemed from tokens. Models are
+  // named for where they run (`anthropic/…`, `ollama/…`), so picking one is
+  // picking whose data policy applies; /pool/v1/models says which is which.
+  { key: 'ivxpool',    name: 'ivx/ai Pool', kind: 'openai', baseUrl: 'https://api.ivx.run/ai/pool/v1', needsKey: true,
+    defaultModel: 'ollama/gpt-oss:120b', models: ['ollama/gpt-oss:120b'],
+    hint: 'Models on keys other people lent, from Ollama, OpenAI, Anthropic and more. Sign in at ai.ivx.run/api with a wallet, lend a key or redeem tokens, and make the token that goes here there. Messages pass through our server to the provider named in the model, which may keep them; the model list says which do.' },
   { key: 'openrouter', name: 'OpenRouter',        kind: 'openai',    baseUrl: 'https://openrouter.ai/api/v1', needsKey: true,
     hint: 'Key from openrouter.ai/keys' },
   { key: 'openai',     name: 'OpenAI',            kind: 'openai',    baseUrl: 'https://api.openai.com/v1', needsKey: true },
@@ -116,7 +129,7 @@ export class ProviderError extends Error {
 async function networkHint(provider, err) {
   const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(provider.baseUrl);
   const mixed = location.protocol === 'https:' && provider.baseUrl.startsWith('http:');
-  const via = bridge.ready();
+  const via = bridge.via(provider.baseUrl);
 
   // Through the bridge the browser never sees the endpoint, so none of the
   // browser-imposed reasons below apply and repeating them would mislead.
@@ -127,7 +140,7 @@ async function networkHint(provider, err) {
   // itself. (When the bridge did reach the endpoint and the endpoint failed,
   // it answers with a status and a reason, and that is read elsewhere.)
   if (via) {
-    return bridge.explainUnreachable();
+    return bridge.explainUnreachable(via);
   }
 
   // In the extension, whether the browser applied a CORS rule to this call
@@ -156,7 +169,7 @@ async function networkHint(provider, err) {
   if (mixed && !local) {
     return `Blocked: this page is HTTPS and the endpoint is plain HTTP.${offer}`;
   }
-  if (provider.kind === 'ollama') {
+  if (provider.kind === 'ollama' && local) {
     return `Could not reach ${provider.baseUrl}. Either start Ollama with ` +
       `OLLAMA_ORIGINS='${location.origin}', or use the bridge ` +
       '(Settings → CORS bypass).';
@@ -240,6 +253,76 @@ function headersFor(provider, apiKey) {
     if (k && v) h[k] = v;
   }
   return h;
+}
+
+/* ── message content ───────────────────────────────────────── */
+
+/* A message's `content` is either a plain string — which is every chat that
+   has never attached anything, and the shape this file spoke for its whole
+   life — or the list of neutral parts attach.js builds for one that has:
+
+     { type: 'text', text }
+     { type: 'image', mediaType, data }        // base64, no data: prefix
+     { type: 'document', mediaType, data, name }
+
+   Each provider spells those differently, and some cannot carry them at all.
+   A part that cannot travel is replaced by a sentence saying so, never
+   dropped: a model answering about a picture it was never shown, with no hint
+   that it was not shown it, is the one outcome worth engineering against. */
+
+const dataUrl = part => `data:${part.mediaType || 'application/octet-stream'};base64,${part.data}`;
+
+const undelivered = part =>
+  `[The ${part.type} “${part.name || 'attachment'}” could not be sent to this ` +
+  'provider, which accepts text only. Answer about it only from what the ' +
+  'conversation says, and say plainly that you cannot see it.]';
+
+/** OpenAI-compatible, and WebLLM, which speaks the same shape. */
+function openaiParts(parts, { files }) {
+  return parts.map(part => {
+    if (part.type === 'image') return { type: 'image_url', image_url: { url: dataUrl(part) } };
+    if (part.type === 'document') {
+      // The documented shape for a PDF on /chat/completions. WebLLM has no
+      // equivalent, and neither do most compatible servers.
+      return files
+        ? { type: 'file', file: { filename: part.name || 'document.pdf', file_data: dataUrl(part) } }
+        : { type: 'text', text: undelivered(part) };
+    }
+    return { type: 'text', text: part.text || '' };
+  });
+}
+
+function anthropicParts(parts) {
+  return parts.map(part => (
+    part.type === 'image' || part.type === 'document'
+      ? { type: part.type, source: { type: 'base64', media_type: part.mediaType, data: part.data } }
+      : { type: 'text', text: part.text || '' }
+  ));
+}
+
+/** Ollama keeps pictures out of the content: the text is a string, and the
+    images ride alongside it as bare base64. */
+function ollamaMessage(role, parts) {
+  const images = [];
+  const text = [];
+  for (const part of parts) {
+    if (part.type === 'image') images.push(part.data);
+    else if (part.type === 'document') text.push(undelivered(part));
+    else if (part.text) text.push(part.text);
+  }
+  return { role, content: text.join('\n\n'), ...(images.length ? { images } : {}) };
+}
+
+/** Put a conversation into the shape one provider reads. Plain-string
+    messages pass through untouched, so nothing changes for a chat with
+    nothing attached. */
+function shapeMessages(kind, messages) {
+  return messages.map(m => {
+    if (!Array.isArray(m.content)) return m;
+    if (kind === 'ollama') return ollamaMessage(m.role, m.content);
+    if (kind === 'anthropic') return { ...m, content: anthropicParts(m.content) };
+    return { ...m, content: openaiParts(m.content, { files: kind === 'openai' }) };
+  });
 }
 
 /* ── streaming helpers ─────────────────────────────────────── */
@@ -387,8 +470,9 @@ async function streamWebLLM({ model, system, messages, temperature, maxTokens, s
     // visible here; without this check the load would finish and generate
     // into a chat the user already left.
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    const shaped = shapeMessages('webllm', messages);
     const chunks = await engine.chat.completions.create({
-      messages: system ? [{ role: 'system', content: system }, ...messages] : messages,
+      messages: system ? [{ role: 'system', content: system }, ...shaped] : shaped,
       stream: true,
       stream_options: { include_usage: true },
       ...(temperature != null ? { temperature } : {}),
@@ -467,11 +551,12 @@ export async function streamChat({ provider, apiKey, model, system, messages, te
   }
 
   let url, body;
+  const shaped = shapeMessages(provider.kind, messages);
   if (provider.kind === 'ollama') {
     url = `${base}/api/chat`;
     body = {
       model, stream: true,
-      messages: system ? [{ role: 'system', content: system }, ...messages] : messages,
+      messages: system ? [{ role: 'system', content: system }, ...shaped] : shaped,
       options: {
         ...(temperature != null ? { temperature } : {}),
         ...(maxTokens ? { num_predict: maxTokens } : {}),
@@ -484,13 +569,13 @@ export async function streamChat({ provider, apiKey, model, system, messages, te
       max_tokens: maxTokens || 4096,
       ...(system ? { system } : {}),
       ...(temperature != null ? { temperature: Math.min(temperature, 1) } : {}),
-      messages: messages.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+      messages: shaped.map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
     };
   } else {
     url = `${base}/chat/completions`;
     body = {
       model, stream: true,
-      messages: system ? [{ role: 'system', content: system }, ...messages] : messages,
+      messages: system ? [{ role: 'system', content: system }, ...shaped] : shaped,
       ...(temperature != null ? { temperature } : {}),
       ...(maxTokens ? { max_tokens: maxTokens } : {}),
       stream_options: { include_usage: true },

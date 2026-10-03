@@ -200,8 +200,10 @@ export async function importShared(bundle) {
    under Settings → Privacy & data; the caller hides the button while it is
    off, and no shortener is ever contacted without it. */
 export async function shortenUrl(url) {
+  // Not via the hosted bridge: the link carries the chat, and one third party
+  // seeing it is the price of shortening, not two.
   const [endpoint] = bridge.apply(
-    `https://tinyurl.com/api-create.php?url=${encodeURIComponent(url)}`, {});
+    `https://tinyurl.com/api-create.php?url=${encodeURIComponent(url)}`, {}, { hosted: false });
   try {
     const res = await fetch(endpoint);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

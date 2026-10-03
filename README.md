@@ -56,12 +56,19 @@ Step-by-step setup for each: [ai.ivx.run/docs](https://ai.ivx.run/docs/).
   MCP server you add.
 - **The Store.** Ready-made services, agents, tools and skills you can install
   in a tap.
+- **Attachments.** Pick, paste or drop pictures, video, audio and files into a
+  message. They stay in this browser like everything else. Pictures go to the
+  model as pictures, text files go as their text, and anything a model cannot
+  read is named in the prompt rather than passed off as readable.
 - **Settings per chat.** Its own prompt, creativity, length limit and how much
   history to send.
 - **Fix and retry.** Edit any message and run the conversation again from there.
+- **Right-click anything.** A message, a code block, a link, an attachment, a
+  chat in the list: the menu holds what that one thing can do.
 - **Share a chat** with a link that carries the conversation inside it, so no
   server ever holds a copy.
-- **Export** one chat as a file, or everything at once as a backup.
+- **Export** one chat as a file, or everything at once as a backup —
+  attachments included.
 - **Search** your chats.
 - **Works offline** once installed, if the model is on your own computer.
 - **Erase everything** in one go.
@@ -94,26 +101,30 @@ brew install --cask ivxai-chat
 We do not pay Apple or Microsoft for a signing certificate, so both warn you
 the first time you open it. The release notes show what to click.
 
-Android and iOS work but are not published yet.
+On Android, download the APK from the same releases page:
+`ivxai-chat-<version>-android-arm64-v8a.apk` fits nearly every phone, and
+`-android-universal.apk` fits all of them, at three times the size. Android
+asks you to allow installing from your browser the first time. iOS works but is
+not published yet.
 
 **3. On your own server**
 
 For a copy your household or team can share, on a rented server or a spare
 machine at home: [Self-hosting](https://ai.ivx.run/docs/self-hosting/).
 
-## The helper: ivx-bridge
+## The helper: ivxai-bridge
 
 Browsers do not let a web page talk to programs on your own computer, and many
 online services refuse calls that come from a web page. Neither is a fault in
 the model or tool you are using.
 
-`ivx-bridge` makes those calls on the page's behalf. The installed apps carry it
+`ivxai-bridge` makes those calls on the page's behalf. The installed apps carry it
 inside them, so this only matters in the browser version: install it, leave it
 running, then turn on **Settings → CORS bypass → Look for the bridge**.
 
 ```sh
-brew install ivx-bridge     # or download it from the releases page
-ivx-bridge
+brew install ivxai-bridge     # or download it from the releases page
+ivxai-bridge
 ```
 
 It reads nothing, stores nothing, and only answers ivx/ai Chat.
@@ -124,7 +135,7 @@ More: [The bridge](https://ai.ivx.run/docs/bridge/).
 | | |
 | --- | --- |
 | `web/` | the app itself |
-| `crates/ivx-bridge/` | the bridge: library and standalone daemon |
+| `crates/ivxai-bridge/` | the bridge: library and standalone daemon |
 | `src-tauri/` | the desktop and mobile shell, which embeds that library |
 | `packaging/extension/` | the same app as a Chrome, Firefox and Safari extension |
 
@@ -137,7 +148,7 @@ npm install
 | What | Command | Needs |
 | --- | --- | --- |
 | The web app | `npm run web:build` | Node |
-| The bridge | `cargo build --release -p ivx-bridge` | Rust |
+| The bridge | `cargo build --release -p ivxai-bridge` | Rust |
 | The app | `npm run build` | Rust, Node, [Tauri prerequisites](https://tauri.app/start/prerequisites/) |
 | The app, running | `npm run dev` | same |
 | The extensions | `npm run ext:build` | Node |

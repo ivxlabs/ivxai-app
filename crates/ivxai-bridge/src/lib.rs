@@ -17,11 +17,11 @@
 //! identical path through the UI.
 //!
 //! ```no_run
-//! # async fn run() -> Result<(), ivx_bridge::BoxError> {
+//! # async fn run() -> Result<(), ivxai_bridge::BoxError> {
 //! use std::sync::Arc;
 //! let listener = tokio::net::TcpListener::bind("127.0.0.1:8787").await?;
-//! let state = Arc::new(ivx_bridge::State::new(ivx_bridge::Config::default())?);
-//! ivx_bridge::serve(listener, state).await?;
+//! let state = Arc::new(ivxai_bridge::State::new(ivxai_bridge::Config::default())?);
+//! ivxai_bridge::serve(listener, state).await?;
 //! # Ok(()) }
 //! ```
 
@@ -105,7 +105,7 @@ impl State {
             // No overall timeout on purpose: a streamed completion is a single
             // response that can legitimately stay open for many minutes.
             .danger_accept_invalid_certs(config.insecure)
-            .user_agent(format!("ivx-bridge/{VERSION}"))
+            .user_agent(format!("ivxai-bridge/{VERSION}"))
             .build()?;
         Ok(Self {
             config,
@@ -228,7 +228,7 @@ fn health(state: &State, origin: Option<&str>) -> Response<Body> {
     state.log(&format!("health from {}", origin.unwrap_or("-")));
     let body = format!(
         concat!(
-            r#"{{"ok":true,"name":"ivx-bridge","version":"{}","protocol":{},"#,
+            r#"{{"ok":true,"name":"ivxai-bridge","version":"{}","protocol":{},"#,
             r#""originAllowed":{},"needsToken":{},"servesUi":{},"mcp":{}}}"#
         ),
         VERSION,

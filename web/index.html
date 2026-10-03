@@ -9,7 +9,7 @@
      eval() or new Function() — never 'unsafe-eval'. connect-src must stay
      open: it is how your own provider endpoints are reached. frame-ancestors
      is header-only, so serve it from your web server if you need it. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src *; form-action 'self'; base-uri 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src *; form-action 'self'; base-uri 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <title>ivx/ai Chat</title>
 <meta name="description" content="A lightweight, browser-based chat client designed for users who want total control over their data and their AI interactions.">
@@ -77,7 +77,12 @@
           <span class="chip-caret ri-arrow-down-s-line" aria-hidden="true"></span>
         </button>
       </div>
+      <div id="mentionMenu" class="mention-menu" hidden role="listbox" aria-label="Mention a tab, agent or chat"></div>
+      <div id="mentionTray" class="attach-tray" hidden aria-label="Mentioned"></div>
+      <div id="attachTray" class="attach-tray" hidden aria-label="Attachments"></div>
       <div class="composer-row">
+        <button id="btnAttach" class="attach-btn ri-attachment-2" type="button" aria-label="Attach files" title="Attach images, video or files"></button>
+        <input id="fileInput" type="file" multiple hidden>
         <textarea id="input" class="composer-input" rows="1" placeholder="Message" aria-label="Message"></textarea>
         <button id="btnSend" class="send-btn ri-arrow-up-line" type="submit" aria-label="Send"></button>
         <button id="btnStop" class="send-btn send-stop ri-stop-fill" type="button" aria-label="Stop generating" hidden></button>

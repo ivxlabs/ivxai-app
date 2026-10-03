@@ -5,7 +5,7 @@
 //!
 //! The webview is the same ivx/ai Chat that runs on the web — the build in
 //! `web/`, and this crate adds nothing to the page. What it adds is a
-//! [`ivx_bridge`] server running in-process on an ephemeral loopback port,
+//! [`ivxai_bridge`] server running in-process on an ephemeral loopback port,
 //! which is how the app escapes CORS: providers that refuse a browser origin
 //! are reached through the bridge instead.
 //!
@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use ivx_bridge::{Config, State};
+use ivxai_bridge::{Config, State};
 
 /// Handed to the page so it can find the bridge without probing for it.
 ///
@@ -29,7 +29,7 @@ fn init_script(port: u16, token: &str) -> String {
     // Both values are ours: a u16 and hex from the system RNG. Nothing here
     // comes from the page or the network.
     format!(
-        r#"Object.defineProperty(window, "__IVX_BRIDGE__", {{
+        r#"Object.defineProperty(window, "__IVXAI_BRIDGE__", {{
   value: Object.freeze({{ url: "http://127.0.0.1:{port}", token: "{token}", source: "app" }}),
   writable: false, configurable: false
 }});"#
@@ -67,7 +67,7 @@ fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
 /// Carries the script to every webview, including the ones declared in
 /// `tauri.conf.json` — a plugin is the only hook that reaches those.
 fn bridge_plugin<R: tauri::Runtime>(script: String) -> tauri::plugin::TauriPlugin<R> {
-    tauri::plugin::Builder::<R, ()>::new("ivx-bridge")
+    tauri::plugin::Builder::<R, ()>::new("ivxai-bridge")
         .js_init_script(script)
         .build()
 }
@@ -83,7 +83,7 @@ pub fn run() {
         .local_addr()
         .expect("a bound listener has an address")
         .port();
-    let token = ivx_bridge::random_token();
+    let token = ivxai_bridge::random_token();
 
     let bridge_token = token.clone();
     tauri::Builder::default()
@@ -122,7 +122,7 @@ pub fn run() {
                     Ok(listener) => listener,
                     Err(err) => return eprintln!("ivx: bridge could not start: {err}"),
                 };
-                if let Err(err) = ivx_bridge::serve(listener, state).await {
+                if let Err(err) = ivxai_bridge::serve(listener, state).await {
                     // Losing the bridge is not fatal: providers that send their
                     // own CORS headers keep working, and the UI reports the
                     // bridge as unavailable rather than pretending otherwise.

@@ -21,6 +21,7 @@
 //! not so a stranger's page can use your shell.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -30,7 +31,7 @@ use hyper::{Request, Response, StatusCode};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::{json_error, Body, State};
 
@@ -49,6 +50,123 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A ceiling, so a misbehaving page cannot turn the bridge into a process farm.
 const MAX_SESSIONS: usize = 32;
+
+/// How long to wait on the login shell when asking it for a `PATH`. Startup
+/// files can be slow — a version manager, a prompt framework — but past this
+/// the answer is not worth the wait, and the fallbacks below will do.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Where to look when the shell has nothing to say: both Homebrew prefixes
+/// and the base system. Empty off Unix, where `PATH` is inherited intact.
+#[cfg(unix)]
+const FALLBACK_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+#[cfg(not(unix))]
+const FALLBACK_PATH: &str = "";
+
+/// Asked once and kept: one shell startup for the life of the bridge.
+static SEARCH_PATH: OnceCell<String> = OnceCell::const_new();
+
+/// The `PATH` to look for MCP programs on.
+///
+/// The bridge is started as a service, not from a shell, so it does not have
+/// a shell's `PATH`: launchd hands it `/usr/bin:/bin:/usr/sbin:/sbin`, and an
+/// app launched from the desktop gets no better. None of that holds Homebrew,
+/// nvm, or the other places a person's tools actually live — and an MCP server
+/// is configured as exactly those tools (`npx`, `uvx`, `python`). Spawned off
+/// the bridge's own `PATH` they come back "No such file or directory" for a
+/// program the user can plainly run in their terminal.
+///
+/// So the login shell is asked what its `PATH` is, and MCP programs are looked
+/// up on that, with the bridge's own and the usual prefixes behind it.
+async fn search_path() -> &'static str {
+    SEARCH_PATH
+        .get_or_init(|| async {
+            let own = std::env::var("PATH").unwrap_or_default();
+            if cfg!(not(unix)) {
+                return own;
+            }
+            let shell = shell_path().await.unwrap_or_default();
+            merge(&[&shell, &own, FALLBACK_PATH])
+        })
+        .await
+}
+
+/// Ask `$SHELL` what its `PATH` is.
+///
+/// `-l` reads the login files and `-i` the interactive ones, because an export
+/// is as likely to sit in `~/.zshrc` as in `~/.zprofile`. Startup files print
+/// things — greetings, version managers, prompt preambles — so the value comes
+/// back between markers rather than as the whole of stdout, and stdin is closed
+/// so a shell that decides to ask something cannot hang the bridge.
+#[cfg(unix)]
+async fn shell_path() -> Option<String> {
+    const MARK: &str = "__ivx_path__";
+
+    let shell = std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty())?;
+    let script = format!("printf '%s%s%s' '{MARK}' \"$PATH\" '{MARK}'");
+    let out = tokio::time::timeout(
+        SHELL_TIMEOUT,
+        tokio::process::Command::new(&shell)
+            .args(["-lic", &script])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (_, rest) = text.split_once(MARK)?;
+    let (path, _) = rest.split_once(MARK)?;
+    Some(path.trim().to_string())
+}
+
+#[cfg(not(unix))]
+async fn shell_path() -> Option<String> {
+    None // nothing to ask: a Windows process is started with the user's PATH
+}
+
+/// One `PATH` out of several, in order, without repeats.
+fn merge(paths: &[&str]) -> String {
+    let mut dirs: Vec<&str> = Vec::new();
+    for dir in paths.iter().flat_map(|path| path.split(':')) {
+        if !dir.is_empty() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs.join(":")
+}
+
+/// Find `command` the way a shell would: a name is looked for in each
+/// directory of `path`, and anything with a slash in it is a path already and
+/// is handed to the spawn as given, so the spawn can report what is wrong.
+fn resolve(command: &str, path: &str) -> Option<PathBuf> {
+    if cfg!(not(unix)) || command.contains('/') {
+        return Some(PathBuf::from(command));
+    }
+    path.split(':')
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| Path::new(dir).join(command))
+        .find(|candidate| runnable(candidate))
+}
+
+/// A file that exists and can be executed — not a directory that shares the
+/// name, and not a file sitting there without its bit set.
+fn runnable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
 
 struct Session {
     child: Child,
@@ -170,9 +288,35 @@ async fn start(state: &State, msg: &Value, origin: Option<&str>) -> Response<Bod
         );
     }
 
-    let mut cmd = tokio::process::Command::new(&command);
+    // A configured server names a program (`npx`, `uvx`), and the bridge's own
+    // `PATH` is a service's, which knows none of them; see `search_path`. A
+    // server that carries its own `PATH` meant it, and keeps it.
+    let path = match env.iter().find(|(key, _)| key == "PATH") {
+        Some((_, given)) => given.clone(),
+        None => search_path().await.to_string(),
+    };
+    let Some(program) = resolve(&command, &path) else {
+        // The PATH searched belongs in the log, not in a message box: it is a
+        // paragraph of directories, and it is what a person debugging this
+        // wants to read.
+        state.log(&format!("mcp start `{command}` not found on {path}"));
+        return json_error(
+            state,
+            StatusCode::BAD_GATEWAY,
+            &format!(
+                "Could not find `{command}` on this machine. Give the full \
+                 path to the program, or put its folder on PATH. The bridge \
+                 log lists where it looked."
+            ),
+            origin,
+        );
+    };
+
+    let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&args)
         .envs(env)
+        // The program's own children need to be found too: `npx` runs `node`.
+        .env("PATH", &path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -380,6 +524,34 @@ fn reply(body: Value, origin: Option<&str>) -> Response<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_keeps_order_and_drops_repeats() {
+        assert_eq!(merge(&["/a:/b", "/b:/c", ""]), "/a:/b:/c");
+        assert_eq!(merge(&["", "::/a::"]), "/a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_finds_a_name_on_the_path() {
+        // `sh` is the one program every Unix has, in a place every Unix has.
+        assert_eq!(
+            resolve("sh", "/nowhere:/bin"),
+            Some(PathBuf::from("/bin/sh"))
+        );
+        assert_eq!(resolve("sh", "/nowhere"), None);
+        // A directory of the right name is not a program.
+        assert_eq!(resolve("tmp", "/"), None);
+    }
+
+    #[test]
+    fn resolve_leaves_a_path_alone() {
+        // Handed on as given, missing or not, so the spawn reports the reason.
+        assert_eq!(
+            resolve("/opt/does-not-exist/server", ""),
+            Some(PathBuf::from("/opt/does-not-exist/server"))
+        );
+    }
 
     #[test]
     fn session_idle_reaps_nothing_fresh() {

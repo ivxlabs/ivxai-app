@@ -23,5 +23,5 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 # The same server the standalone daemon runs. Desktop, mobile and "just the
 # daemon" therefore take one code path through the UI, not three.
-ivx-bridge = { path = "../crates/ivx-bridge", default-features = false }
+ivxai-bridge = { path = "../crates/ivxai-bridge", default-features = false }
 tokio = { version = "1", features = ["net", "rt"] }

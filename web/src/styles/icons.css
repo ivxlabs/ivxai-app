@@ -1,7 +1,6 @@
-/* Remix Icon, subset for this app — https://remixicon.com (Apache-2.0).
-   Only the thirteen glyphs this app uses ship, from the upstream woff2 file.
-   The full stylesheet carries ~3000 rules and a 3 MB svg font, which the
-   offline precache would pull in whole for a dozen icons. */
+/* Remix Icon for this app — https://remixicon.com (Apache-2.0).
+   Only the glyphs this app names get a rule: the full stylesheet carries
+   ~3000 of them, which the offline precache would pull in whole. */
 
 @font-face {
   font-family: 'remixicon';
@@ -18,6 +17,7 @@
 }
 
 .ri-add-line::before { content: '\ea13'; }
+.ri-attachment-2::before { content: '\ea84'; }
 .ri-arrow-down-line::before { content: '\ea4c'; }
 .ri-arrow-down-s-line::before { content: '\ea4e'; }
 .ri-arrow-left-line::before { content: '\ea60'; }
@@ -30,3 +30,16 @@
 .ri-settings-3-line::before { content: '\f0e6'; }
 .ri-stop-fill::before { content: '\f1a0'; }
 .ri-store-2-line::before { content: '\f1a5'; }
+.ri-image-line::before { content: '\ee4b'; }
+.ri-movie-line::before { content: '\ef81'; }
+.ri-music-2-line::before { content: '\ef83'; }
+.ri-file-text-line::before { content: '\ed0f'; }
+.ri-file-line::before { content: '\eceb'; }
+/* What an `@` mention can name: an open tab, an agent, one of your chats. */
+.ri-window-line::before { content: '\f2c6'; }
+.ri-robot-2-line::before { content: '\f3d9'; }
+.ri-chat-1-line::before { content: '\eb4d'; }
+.ri-file-copy-line::before { content: '\ecd5'; }
+.ri-edit-line::before { content: '\ec86'; }
+.ri-refresh-line::before { content: '\f064'; }
+.ri-delete-bin-line::before { content: '\ec2a'; }

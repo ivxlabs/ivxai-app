@@ -12,7 +12,7 @@
              toggle, because a CORS failure is a fact about each server.
    - `stdio` a program on this machine. A browser cannot spawn processes, so
              this always goes through the bridge, which starts it and pipes
-             JSON-RPC over its stdin/stdout (/mcp/stdio in ivx-bridge). In the
+             JSON-RPC over its stdin/stdout (/mcp/stdio in ivxai-bridge). In the
              desktop app the bridge is built in, so it just works there.
 
    Tools are discovered with tools/list and cached. The cache is what the
@@ -22,6 +22,9 @@
 
 import * as store from './store.js';
 import * as bridge from './bridge.js';
+import * as oauth from './mcp-oauth.js';
+
+export { NeedsAuth } from './mcp-oauth.js';
 
 const KV_KEY = 'mcpServers';
 
@@ -29,7 +32,7 @@ const KV_KEY = 'mcpServers';
     version, which the spec says to accept, so older servers still pair. */
 const PROTOCOL_VERSION = '2025-06-18';
 
-const CLIENT_INFO = { name: 'ivx-ai-chat', version: '0.2.2' };
+const CLIENT_INFO = { name: 'ivx-ai-chat', version: '0.3.0' };
 
 /** tools/list answers are held this long before being asked for again. */
 const TOOLS_TTL_MS = 5 * 60 * 1000;
@@ -75,6 +78,12 @@ function normalize(s) {
     url: s.url || '',
     token: s.token || '',
     headers: s.headers && typeof s.headers === 'object' ? { ...s.headers } : {},
+    // What a sign-in left behind: the issuer, the client id this install
+    // registered, where to refresh. Public identifiers, deliberately not in
+    // the vault — a locked vault should still know who we are, so that the
+    // settings screen can say "signed in, unlock to use it" rather than
+    // offering to register all over again. The tokens are in the vault.
+    oauth: s.oauth && typeof s.oauth === 'object' ? { ...s.oauth } : null,
     command: s.command || '',
     args: Array.isArray(s.args) ? s.args : [],
     env: s.env && typeof s.env === 'object' ? { ...s.env } : {},
@@ -157,6 +166,29 @@ async function parseHttp(res, requestId) {
   try { return JSON.parse(text); } catch { throw new McpError('The server sent a reply that is not JSON'); }
 }
 
+/**
+ * Why a server turned a request away, in its own words.
+ *
+ * Two places to look and neither is reliable alone: RFC 6750 puts
+ * `error_description` in the WWW-Authenticate header, and plenty of servers
+ * put the useful sentence in a JSON body instead — Notion answers
+ * `{"message": "API token is invalid."}` with no description in the header at
+ * all. Whichever exists is the one worth showing.
+ */
+async function authFailure(res) {
+  const challenge = res.headers.get('www-authenticate') || '';
+  const described = /error_description\s*=\s*"([^"]+)"/i.exec(challenge)?.[1];
+  let fromBody = '';
+  try {
+    const json = JSON.parse(await res.text());
+    fromBody = json?.error_description || json?.message
+      || json?.error?.message || (typeof json?.error === 'string' ? json.error : '');
+  } catch {
+    /* not JSON, or already consumed; the header is all there is */
+  }
+  return { challenge, detail: oneLine(described || fromBody || '') };
+}
+
 async function httpRpc(server, body, signal, { withSession = true } = {}) {
   const base = String(server.url || '').trim();
   if (!base) throw new McpError('No URL configured for this server');
@@ -165,7 +197,13 @@ async function httpRpc(server, body, signal, { withSession = true } = {}) {
     'Accept': 'application/json, text/event-stream',
     ...(server.headers || {}),
   };
-  if (server.token) headers.Authorization = `Bearer ${server.token}`;
+  /* A sign-in outranks a pasted token: someone who has both most recently
+     did the one that needed a browser window. `authHeader` refreshes on the
+     way through when the access token is nearly out, so the common case of a
+     long chat never sees a 401 at all. */
+  const bearer = await oauth.authHeader(server);
+  if (bearer) headers.Authorization = bearer;
+  else if (server.token) headers.Authorization = `Bearer ${server.token}`;
   const httpSession = withSession ? sessions.get(server.id)?.http : null;
   if (httpSession) headers['Mcp-Session-Id'] = httpSession;
 
@@ -192,6 +230,32 @@ async function httpRpc(server, body, signal, { withSession = true } = {}) {
   }
   if (httpSession && res.status === 404) {
     throw new StaleSession('The server dropped our session');
+  }
+  /* 401 is not a failure to report, it is a question to ask — and the answer
+     is in the reply, so it is read rather than guessed at. A 403 counts too
+     when it carries a challenge, which is how RFC 6750 spells "you are signed
+     in but this token is not allowed to do that".
+
+     Saying what the server said matters more here than anywhere else in this
+     file. "Expired or revoked" is a plausible story about a 401 and often the
+     wrong one; the server usually knows exactly what is wrong with the token
+     and says so, and a person debugging a sign-in needs that sentence and not
+     our impression of it. */
+  if (res.status === 401 || (res.status === 403 && res.headers.get('www-authenticate'))) {
+    const { challenge, detail } = await authFailure(res);
+    const said = detail ? ` It said: ${detail}` : '';
+    throw new oauth.NeedsAuth(
+      challenge,
+      bearer
+        ? `${server.name} would not accept the token from your sign-in.${said}`
+        : server.oauth?.clientId
+          // Signed in, but the token is behind a passphrase nobody has typed
+          // this session. Saying "sign in" here would send someone through a
+          // consent screen to fix a lock.
+          ? 'Signed in, but your keys are locked — unlock them under Privacy & data.'
+          : `This server needs you to sign in.${said}`,
+      detail,
+    );
   }
   const announced = res.headers.get('mcp-session-id');
   if (announced) {
@@ -290,9 +354,21 @@ async function rpcWithRetry(server, method, params, signal) {
   try {
     return await rpc(server, method, params, signal);
   } catch (err) {
-    if (!(err instanceof StaleSession)) throw err;
-    await initialize(server, signal);
-    return await rpc(server, method, params, signal);
+    if (err instanceof StaleSession) {
+      await initialize(server, signal);
+      return await rpc(server, method, params, signal);
+    }
+    /* A 401 with a refresh token in hand is worth one silent retry: an access
+       token can be revoked or expire early, and the person should not be sent
+       through a consent screen for something a background call can fix. If the
+       refresh fails the original question stands, and the settings screen
+       offers the sign-in. */
+    if (err instanceof oauth.NeedsAuth && await oauth.refresh(server)) {
+      sessions.delete(server.id);
+      await initialize(server, signal);
+      return await rpc(server, method, params, signal);
+    }
+    throw err;
   }
 }
 
@@ -320,7 +396,14 @@ export async function toolsFor(server, { refresh = false } = {}) {
     catalog.set(server.id, entry);
     return entry;
   } catch (err) {
-    const entry = { tools: [], error: err.message || String(err), fetchedAt: Date.now() };
+    const entry = {
+      tools: [], error: err.message || String(err), fetchedAt: Date.now(),
+      // Not just another failure: this one has a button. The settings screen
+      // offers the sign-in instead of printing a status code at someone.
+      needsAuth: err instanceof oauth.NeedsAuth,
+      challenge: err instanceof oauth.NeedsAuth ? err.challenge : '',
+      detail: err instanceof oauth.NeedsAuth ? err.detail : '',
+    };
     catalog.set(server.id, entry);
     return entry;
   }
@@ -356,11 +439,65 @@ export async function test(server) {
   try {
     if (server.transport === 'http') sessions.delete(server.id);
     const entry = await toolsFor(server, { refresh: true });
-    if (entry.error) return { ok: false, tools: [], error: entry.error };
+    if (entry.error) {
+      return {
+        ok: false, tools: [], error: entry.error,
+        needsAuth: Boolean(entry.needsAuth), challenge: entry.challenge || '',
+        detail: entry.detail || '',
+      };
+    }
     return { ok: true, tools: entry.tools.map(t => t.name), error: '' };
   } catch (err) {
     return { ok: false, tools: [], error: err.message || String(err) };
   }
+}
+
+/* ── signing in ────────────────────────────────────────────── */
+
+/**
+ * Whether this server has been signed in to from this browser.
+ *
+ * Read off the registration rather than the token, because the token is in the
+ * vault and the vault may be locked — and "signed in, unlock to use it" is the
+ * truth in that case, where offering to sign in again would not be.
+ */
+export const signedIn = server => Boolean(server.oauth?.clientId);
+
+/**
+ * Run the sign-in, and remember what it left behind.
+ *
+ * Must be called straight out of a click — the popup and the optional
+ * `identity` permission both need that gesture, and an await before either
+ * loses it, which is why nothing is looked up here first.
+ *
+ * The tokens go to the vault (mcp-oauth.js puts them there); what lands on the
+ * server record is the public half — issuer, client id, where to refresh — so
+ * this saves the servers file afterwards.
+ */
+export async function connect(server, challenge = '', options = {}) {
+  const { oauth: registration } = await oauth.connect(server, challenge, options);
+  server.oauth = registration;
+  // save() invalidates a server whose record changed, which drops the tools it
+  // listed without a token and the session it listed them over.
+  await save(servers);
+  return server;
+}
+
+/**
+ * Forget a sign-in: the tokens go, and so does the registration.
+ *
+ * The registration goes too because a client id is only useful with a token to
+ * go with it, and keeping it would mean a later sign-in silently reused a
+ * registration the person thought they had removed.
+ *
+ * The server's own session is not ours to end — "disconnect" here means this
+ * browser stops holding the token, and the UI says exactly that rather than
+ * implying we revoked anything.
+ */
+export async function disconnect(server) {
+  await oauth.signOut(server.id);
+  server.oauth = null;
+  await save(servers);
 }
 
 /* ── the chat's side: prompt, protocol, execution ──────────── */

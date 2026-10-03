@@ -5,7 +5,10 @@
    localStorage for a handful of UI preferences. Nothing is ever uploaded. */
 
 const DB_NAME = 'ivx';
-const DB_VERSION = 1;
+/* 2 added the attachments store. An upgrade only ever creates what is missing,
+   so a database written by an older build opens, gains the store and keeps
+   every chat it already held. */
+const DB_VERSION = 2;
 const UI_KEY = 'ivx.ui';
 
 let dbp = null;
@@ -27,6 +30,14 @@ function open() {
       }
       if (!db.objectStoreNames.contains('kv')) {
         db.createObjectStore('kv', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('attachments')) {
+        // The bytes of a picture, a video or a file, kept beside the message
+        // that carries it. Both indexes exist so deleting a message or a whole
+        // chat can take its attachments with it without a scan.
+        const s = db.createObjectStore('attachments', { keyPath: 'id' });
+        s.createIndex('convId', 'convId');
+        s.createIndex('msgId', 'msgId');
       }
     };
     req.onsuccess = () => {
@@ -68,6 +79,13 @@ const ask = req => new Promise((resolve, reject) => {
   req.onsuccess = () => resolve(req.result);
   req.onerror = () => reject(req.error);
 });
+
+/** Delete every attachment an index points at, inside the caller's
+    transaction. The keys are read first, so the deletes are issued while the
+    transaction is still alive. */
+const dropAttachments = (atts, index, value) =>
+  ask(atts.index(index).getAllKeys(IDBKeyRange.only(value)))
+    .then(keys => { keys.forEach(k => atts.delete(k)); });
 
 export const uid = () =>
   Date.now().toString(36) + '-' + crypto.getRandomValues(new Uint32Array(2))
@@ -122,19 +140,23 @@ export function newConversation(defaults = {}) {
 }
 
 export function deleteConversation(id) {
-  return run(['conversations', 'messages'], 'readwrite', (convs, msgs) => {
+  return run(['conversations', 'messages', 'attachments'], 'readwrite', (convs, msgs, atts) => {
     convs.delete(id);
     const idx = msgs.index('convId');
-    return ask(idx.getAllKeys(IDBKeyRange.only(id))).then(keys => {
-      keys.forEach(k => msgs.delete(k));
-    });
+    return Promise.all([
+      ask(idx.getAllKeys(IDBKeyRange.only(id))).then(keys => {
+        keys.forEach(k => msgs.delete(k));
+      }),
+      dropAttachments(atts, 'convId', id),
+    ]);
   });
 }
 
 export async function deleteAllConversations() {
-  return run(['conversations', 'messages'], 'readwrite', (convs, msgs) => {
+  return run(['conversations', 'messages', 'attachments'], 'readwrite', (convs, msgs, atts) => {
     convs.clear();
     msgs.clear();
+    atts.clear();
   });
 }
 
@@ -150,18 +172,31 @@ export function putMessage(msg) {
   return run('messages', 'readwrite', s => ask(s.put(msg))).then(() => msg);
 }
 
+/* A message owns its attachments: every path that removes one removes them
+   too, so no picture is ever left behind taking up space for a message that
+   no longer exists. */
+
 export function deleteMessage(id) {
-  return run('messages', 'readwrite', s => ask(s.delete(id)));
+  return run(['messages', 'attachments'], 'readwrite', (msgs, atts) => {
+    msgs.delete(id);
+    return dropAttachments(atts, 'msgId', id);
+  });
 }
 
 export function deleteMessages(ids) {
-  return run('messages', 'readwrite', s => { ids.forEach(id => s.delete(id)); });
+  return run(['messages', 'attachments'], 'readwrite', (msgs, atts) => {
+    ids.forEach(id => msgs.delete(id));
+    return Promise.all(ids.map(id => dropAttachments(atts, 'msgId', id)));
+  });
 }
 
 export function clearMessages(convId) {
-  return run('messages', 'readwrite', s => {
-    const idx = s.index('convId');
-    return ask(idx.getAllKeys(IDBKeyRange.only(convId))).then(keys => keys.forEach(k => s.delete(k)));
+  return run(['messages', 'attachments'], 'readwrite', (msgs, atts) => {
+    const idx = msgs.index('convId');
+    return Promise.all([
+      ask(idx.getAllKeys(IDBKeyRange.only(convId))).then(keys => keys.forEach(k => msgs.delete(k))),
+      dropAttachments(atts, 'convId', convId),
+    ]);
   });
 }
 
@@ -173,19 +208,46 @@ export function allMessages() {
   return run('messages', 'readonly', s => ask(s.getAll()));
 }
 
+/* ── attachments ───────────────────────────────────────────── */
+
+/* A record is { id, convId, msgId, name, type, size, kind, blob, ... }: the
+   file itself, stored as a Blob. Messages keep only the small description of
+   it, so painting a thread never has to read a megabyte it will not show. */
+
+export function putAttachment(record) {
+  return run('attachments', 'readwrite', s => ask(s.put(record))).then(() => record);
+}
+
+export function getAttachment(id) {
+  return run('attachments', 'readonly', s => ask(s.get(id)));
+}
+
+export function attachmentsFor(msgId) {
+  return run('attachments', 'readonly', s => ask(s.index('msgId').getAll(IDBKeyRange.only(msgId))));
+}
+
+export function attachmentsForConversation(convId) {
+  return run('attachments', 'readonly', s => ask(s.index('convId').getAll(IDBKeyRange.only(convId))));
+}
+
+export function allAttachments() {
+  return run('attachments', 'readonly', s => ask(s.getAll()));
+}
+
 /* ── bulk import ───────────────────────────────────────────── */
 
-export function importBundle({ conversations = [], messages = [], kv = [] }) {
-  return run(['conversations', 'messages', 'kv'], 'readwrite', (c, m, k) => {
+export function importBundle({ conversations = [], messages = [], kv = [], attachments = [] }) {
+  return run(['conversations', 'messages', 'kv', 'attachments'], 'readwrite', (c, m, k, a) => {
     conversations.forEach(x => c.put(x));
     messages.forEach(x => m.put(x));
     kv.forEach(x => k.put(x));
+    attachments.forEach(x => a.put(x));
   });
 }
 
 export async function wipeEverything() {
-  await run(['conversations', 'messages', 'kv'], 'readwrite', (c, m, k) => {
-    c.clear(); m.clear(); k.clear();
+  await run(['conversations', 'messages', 'kv', 'attachments'], 'readwrite', (c, m, k, a) => {
+    c.clear(); m.clear(); k.clear(); a.clear();
   });
   try { localStorage.removeItem(UI_KEY); } catch { /* private mode */ }
   if (self.caches) {
@@ -204,6 +266,7 @@ const UI_DEFAULTS = {
   lastAgentId: null,
   shareBaseUrl: '',
   shareShortener: false,
+  pageToolsLang: '',
 };
 
 export function loadUI() {

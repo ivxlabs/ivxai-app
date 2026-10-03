@@ -4,7 +4,7 @@
 // The version lives in one place: [workspace.package] in Cargo.toml.
 //
 //   src-tauri/Cargo.toml   inherits it with version.workspace = true
-//   crates/ivx-bridge      the same, and prints it as `ivx-bridge --version`
+//   crates/ivxai-bridge      the same, and prints it as `ivxai-bridge --version`
 //   tauri.conf.json        has no version field, so Tauri falls back to Cargo
 //   package.json           is not read at build time, but should not lie
 //   web/package.json       the chat client, stamped into its About screen

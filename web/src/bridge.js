@@ -15,8 +15,18 @@
    configured — one extra hop, over loopback, on your own computer.
 
    In the desktop and mobile app the same server runs inside the app process
-   and announces itself on `window.__IVX_BRIDGE__`, so there is nothing to
-   install and nothing to turn on. See github.com/ivxlabs/ivxai-app. */
+   and announces itself on `window.__IVXAI_BRIDGE__`, so there is nothing to
+   install and nothing to turn on. See github.com/ivxlabs/ivxai-app.
+
+   For someone who cannot run a bridge at all — a phone, a work laptop, Safari
+   — there is also the hosted one, the ivx/ai API at api.ivx.run/ai. It speaks
+   the same /health and /proxy, behind a token of the person's own. It is a
+   fallback and never the first choice: a call goes that way only when it is
+   switched on and the bridge on this machine is off or not answering, and a
+   call to an endpoint on this machine or network never goes that way at all,
+   since a server on the internet could not reach it and has no business
+   learning it is there. It is also, unlike the bridge here, somebody else's
+   computer, and the settings screen says so. */
 
 import { kvGet, kvSet } from './store.js';
 
@@ -99,6 +109,9 @@ export const stripsOrigin = () => originStrip;
 const CANDIDATES = [DEFAULT_URL, 'http://localhost:8787'];
 
 const KV_KEY = 'bridge';
+const KV_HOSTED = 'bridgeHosted';
+
+export const HOSTED_URL = 'https://api.ivx.run/ai';
 
 const state = {
   enabled: false,
@@ -109,7 +122,46 @@ const state = {
   checkedAt: 0,
 };
 
+/* The hosted fallback. Its own switch, address and token, kept apart from the
+   bridge above so turning one off never forgets how to reach the other. */
+const hosted = {
+  enabled: false,
+  url: HOSTED_URL,
+  token: '',
+  health: null,
+  checkedAt: 0,
+};
+
 const trimSlash = url => String(url || '').replace(/\/+$/, '');
+
+/* A local bridge that stopped answering is looked for again this often, at
+   most, so calls come back to it by themselves once it is running again. */
+const RECHECK_MS = 60 * 1000;
+
+/**
+ * Whether a URL names this machine or its network.
+ *
+ * Those stay off the hosted bridge whatever else is true. It could not reach
+ * them, and sending it `http://192.168.1.20:11434` would tell a server on the
+ * internet about someone's home network for nothing.
+ */
+export function isPrivateUrl(url) {
+  let host;
+  try { host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch { return true; }
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') ||
+      host.endsWith('.internal') || host.endsWith('.lan') || (!host.includes('.') && !host.includes(':'))) {
+    return true;
+  }
+  const v4 = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127);
+  }
+  return host.includes(':') &&
+    (host === '::1' || /^f[cd]/.test(host) || /^fe[89ab]/.test(host) || host.startsWith('::ffff:'));
+}
 
 /**
  * Ask a bridge what it is.
@@ -119,20 +171,26 @@ const trimSlash = url => String(url || '').replace(/\/+$/, '');
  * and "something is listening but not for this page" — two problems with very
  * different fixes, which a bare CORS failure cannot tell apart.
  */
-export async function probe(url, { timeoutMs = 2500 } = {}) {
+export async function probe(url, { timeoutMs = 2500, token = '' } = {}) {
   const base = trimSlash(url);
   if (!base) throw new Error('No address');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
+    // A token is only sent to the hosted bridge, which answers with whether
+    // it knows it (`tokenOk`). The one on this machine has no use for it here.
     const res = await fetch(`${base}/health`, {
       method: 'GET',
       cache: 'no-store',
       signal: controller.signal,
+      ...(token ? { headers: { 'X-Ivx-Token': token } } : {}),
     });
     if (!res.ok) throw new Error(`The bridge answered ${res.status}`);
     const json = await res.json();
-    if (json?.name !== 'ivx-bridge') throw new Error('Something else is on that port');
+    // Bridges before 0.3.0 called themselves ivx-bridge.
+    if (json?.name !== 'ivxai-bridge' && json?.name !== 'ivx-bridge') {
+      throw new Error('Something else is on that port');
+    }
     return json;
   } finally {
     clearTimeout(timer);
@@ -162,7 +220,7 @@ export async function detect({ extra = [] } = {}) {
  * to find out whether the bridge is actually there.
  */
 export async function init() {
-  const injected = globalThis.__IVX_BRIDGE__;
+  const injected = globalThis.__IVXAI_BRIDGE__;
   if (injected?.url) {
     Object.assign(state, {
       builtIn: true,
@@ -180,6 +238,14 @@ export async function init() {
       token: saved.token || '',
     });
   }
+  const savedHosted = await kvGet(KV_HOSTED, null);
+  if (savedHosted) {
+    Object.assign(hosted, {
+      enabled: Boolean(savedHosted.enabled),
+      url: trimSlash(savedHosted.url) || HOSTED_URL,
+      token: savedHosted.token || '',
+    });
+  }
   return status();
 }
 
@@ -187,6 +253,12 @@ const persist = () => kvSet(KV_KEY, {
   enabled: state.enabled,
   url: state.url,
   token: state.token,
+});
+
+const persistHosted = () => kvSet(KV_HOSTED, {
+  enabled: hosted.enabled,
+  url: hosted.url,
+  token: hosted.token,
 });
 
 /**
@@ -224,15 +296,67 @@ export async function disable() {
   return status();
 }
 
-/** Re-check a bridge we already know about. Never throws. */
-export async function verify() {
-  if (!state.enabled || !state.url) return status();
+/* ── the hosted fallback ───────────────────────────────────── */
+
+/** Save the hosted bridge's address or token, without needing it to answer. */
+export async function configureHosted({ url, token } = {}) {
+  if (url !== undefined) hosted.url = trimSlash(url) || HOSTED_URL;
+  if (token !== undefined) hosted.token = token;
+  await persistHosted();
+  return hosted.enabled ? verifyHosted() : status();
+}
+
+/**
+ * Turn the hosted fallback on. Throws, with a sentence worth showing, unless
+ * it answers, accepts this page, and knows the token.
+ */
+export async function enableHosted({ url = hosted.url, token = hosted.token } = {}) {
+  if (!token) throw new Error('The hosted bridge needs your ivx/ai token first');
+  const health = await probe(url, { token });
+  if (!health.originAllowed) throw new Error(`${trimSlash(url)} does not accept ${location.origin}`);
+  if (health.tokenOk === false) throw new Error('The hosted bridge does not recognise that token');
+  Object.assign(hosted, { enabled: true, url: trimSlash(url), token, health, checkedAt: Date.now() });
+  await persistHosted();
+  return status();
+}
+
+export async function disableHosted() {
+  hosted.enabled = false;
+  hosted.health = null;
+  await persistHosted();
+  return status();
+}
+
+async function verifyHosted() {
+  if (!hosted.enabled || !hosted.url || !hosted.token) return status();
   try {
-    state.health = await probe(state.url);
+    hosted.health = await probe(hosted.url, { token: hosted.token });
   } catch {
-    state.health = null;
+    hosted.health = null;
   }
-  state.checkedAt = Date.now();
+  hosted.checkedAt = Date.now();
+  return status();
+}
+
+/** On, answering, willing to serve this page, and not refusing the token. */
+function hostedReady() {
+  if (state.builtIn) return false;
+  const h = hosted.health;
+  return Boolean(hosted.enabled && hosted.token && h?.ok && h.originAllowed && h.tokenOk !== false);
+}
+
+/** Re-check both bridges we know about. Never throws. */
+export async function verify() {
+  const local = (async () => {
+    if (!state.enabled || !state.url) return;
+    try {
+      state.health = await probe(state.url);
+    } catch {
+      state.health = null;
+    }
+    state.checkedAt = Date.now();
+  })();
+  await Promise.all([local, verifyHosted()]);
   return status();
 }
 
@@ -265,7 +389,28 @@ export function unrestricted() {
   // being dropped. Unasked (null) is taken as yes: it is the answer in every
   // working install, and the check that would say otherwise runs at boot.
   if (EXTENSION && originStrip !== false) return true;
-  return ready();
+  return ready() || hostedReady();
+}
+
+/**
+ * Which bridge a call to `url` would go through: 'local', 'hosted', or null
+ * for straight from this page.
+ *
+ * The bridge on this machine whenever it is up. The hosted one only in its
+ * place, only for endpoints on the internet, and never for itself — calls to
+ * the ivx/ai API as a provider go to it directly, as it answers browsers.
+ */
+export function via(url, { hosted: allowHosted = true } = {}) {
+  if (ready()) return 'local';
+  // Down, or never looked for: look again in the background, so the calls
+  // after this one come back to it by themselves once it is running.
+  if (state.enabled && !state.builtIn && Date.now() - state.checkedAt > RECHECK_MS) {
+    state.checkedAt = Date.now();
+    probe(state.url).then(h => { state.health = h; }, () => { state.health = null; });
+  }
+  if (!allowHosted || !hostedReady()) return null;
+  if (isPrivateUrl(url) || String(url).startsWith(`${hosted.url}/`)) return null;
+  return 'hosted';
 }
 
 export function status() {
@@ -273,6 +418,12 @@ export function status() {
     ...state,
     ready: ready(),
     reachable: Boolean(state.health?.ok),
+    hosted: {
+      ...hosted,
+      ready: hostedReady(),
+      reachable: Boolean(hosted.health?.ok),
+      tokenRefused: hosted.health?.tokenOk === false,
+    },
     // A bridge from a different era of the app. Better to say so than to send
     // it requests it will not understand.
     outdated: Boolean(state.health && state.health.protocol !== PROTOCOL),
@@ -280,21 +431,24 @@ export function status() {
 }
 
 /**
- * Rewrite one request to travel via the bridge.
+ * Rewrite one request to travel via a bridge — the one on this machine, or
+ * the hosted one in its place (see `via`).
  *
- * Returns `[url, headers]` unchanged when the bridge is off or unreachable, so
- * every call site is a single line and there is no second code path to keep in
- * step. The token goes in a header rather than the query string to keep it out
- * of anything that records URLs.
+ * Returns `[url, headers]` unchanged when neither is in use, so every call
+ * site is a single line and there is no second code path to keep in step.
+ * The token goes in a header rather than the query string to keep it out of
+ * anything that records URLs. `{ hosted: false }` keeps a call off the hosted
+ * bridge, for the rare one that should never leave this browser by that way.
  */
-export function apply(url, headers = {}) {
+export function apply(url, headers = {}, options = {}) {
   // No special case for the extension. It does reach most endpoints directly,
   // which is why the bridge is off there by default — but someone who turned
   // it on did so to get past an endpoint that turned them away, and quietly
   // sending the call direct anyway would leave the switch doing nothing.
-  if (!ready()) return [url, headers];
-  const via = `${state.url}/proxy?url=${encodeURIComponent(url)}`;
-  return [via, state.token ? { ...headers, 'X-Ivx-Token': state.token } : headers];
+  const route = via(url, options);
+  if (!route) return [url, headers];
+  const { url: base, token } = route === 'local' ? state : hosted;
+  return [`${base}/proxy?url=${encodeURIComponent(url)}`, token ? { ...headers, 'X-Ivx-Token': token } : headers];
 }
 
 /**
@@ -333,10 +487,30 @@ export function supportsMcp() {
  *
  * Never throws; it is called from an error path.
  */
-export async function explainUnreachable() {
+export async function explainUnreachable(route = 'local') {
+  if (route === 'hosted') {
+    await verify();
+    // The bridge here came back while that call was out: the next one uses it.
+    if (ready()) return 'The call went through the hosted bridge, and was cut off. The bridge on this machine is answering again, so try once more.';
+    if (hostedReady()) {
+      return `The request through the hosted bridge at ${hosted.url} was cut off, though it is ` +
+        'answering now. Worth trying again.';
+    }
+    if (hosted.health?.tokenOk === false) {
+      return `The hosted bridge at ${hosted.url} no longer recognises your token. ` +
+        'Settings → CORS bypass → Hosted bridge.';
+    }
+    return `The hosted bridge at ${hosted.url} did not answer. Is this device online?`;
+  }
+
   const where = state.builtIn ? 'the bridge built into this app' : `the bridge at ${state.url}`;
   const Where = where[0].toUpperCase() + where.slice(1);
   await verify();
+  // Gone from here, but the hosted one can stand in: say that the next try
+  // will not fail the same way, rather than send someone to restart a daemon.
+  const fallback = hostedReady()
+    ? ` Until it is back, calls to online services go through the hosted bridge at ${hosted.url} — try again.`
+    : '';
 
   if (state.health?.ok) {
     if (!state.health.originAllowed) {
@@ -355,9 +529,9 @@ export async function explainUnreachable() {
       'refusing to let an HTTPS page reach a plain-HTTP address on this machine — ' +
       'Safari does that, where Chrome and Firefox do not. The desktop app carries ' +
       'its own bridge; a standalone one can serve the app itself with --ui-dir, ' +
-      'which puts both on the same origin.';
+      'which puts both on the same origin.' + fallback;
   }
-  return `${Where} did not answer. Is it still running?`;
+  return `${Where} did not answer. Is it still running?${fallback}`;
 }
 
 /** One line for a settings row. */
@@ -369,8 +543,14 @@ export function describe() {
       ? 'Off — and this extension is sending an Origin some endpoints refuse'
       : 'Off — the extension calls endpoints directly';
   }
-  if (!state.enabled) return 'Off — the browser talks to providers directly';
   if (state.builtIn) return state.health ? 'Built into this app' : 'Built in, but not answering';
+  const host = (() => { try { return new URL(hosted.url).host; } catch { return hosted.url; } })();
+  if (!ready() && hostedReady()) {
+    return state.enabled
+      ? `Via ${host} — the bridge here is not answering`
+      : `Via ${host} for online services`;
+  }
+  if (!state.enabled) return 'Off — the browser talks to providers directly';
   if (!state.health) return `Not answering at ${state.url}`;
   if (!state.health.originAllowed) return 'Running, but not accepting this origin';
   if (status().outdated) return `Running, but speaks protocol ${state.health.protocol}`;

@@ -100,13 +100,29 @@ pub struct State {
 
 impl State {
     pub fn new(config: Config) -> Result<Self, BoxError> {
-        let client = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .connect_timeout(config.connect_timeout)
             // No overall timeout on purpose: a streamed completion is a single
             // response that can legitimately stay open for many minutes.
             .danger_accept_invalid_certs(config.insecure)
-            .user_agent(format!("ivxai-bridge/{VERSION}"))
-            .build()?;
+            .user_agent(format!("ivxai-bridge/{VERSION}"));
+
+        /* reqwest checks certificates with rustls-platform-verifier unless it
+           is handed roots of its own. On Android that verifier asks the JVM,
+           and it has to be initialised from Kotlin first; nothing here does,
+           so the first https request panicked — and with panic = "abort" that
+           took the whole app down, on the first model list fetched from any
+           hosted provider. Mozilla's roots instead: no JVM involved, at the
+           cost of not seeing certificates the user installed on the phone. */
+        #[cfg(target_os = "android")]
+        let builder = builder.tls_certs_only(
+            webpki_root_certs::TLS_SERVER_ROOT_CERTS
+                .iter()
+                .map(|der| reqwest::Certificate::from_der(der))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+
+        let client = builder.build()?;
         Ok(Self {
             config,
             mcp: McpSessions::default(),

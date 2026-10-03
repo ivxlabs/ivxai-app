@@ -19,7 +19,7 @@
 :root {
   --tap: 2.75rem;               /* 44px: the smallest comfortable touch target */
   --measure: 46rem;             /* reading column on wide screens */
-  --bar: 3.25rem;               /* top bar height */
+  --bar: 3.75rem;               /* top bar height: a --tap button with 8px either side */
   --gutter: 1rem;
   --radius-sheet: 1.25rem;
   --radius-bubble: 1.125rem;
@@ -211,7 +211,7 @@ body {
 .topbar {
   display: flex; align-items: center; gap: .25rem;
   height: calc(var(--bar) + var(--safe-top));
-  padding: var(--safe-top) .375rem 0;
+  padding: var(--safe-top) .5rem 0;
   border-bottom: 1px solid var(--bs-border-color);
   background-color: var(--bs-body-bg);
 }

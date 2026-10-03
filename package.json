@@ -1,7 +1,7 @@
 {
   "name": "ivxai-app",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "A lightweight, browser-based chat client designed for users who want total control over their data and their AI interactions.",
   "license": "GPL-3.0-or-later",

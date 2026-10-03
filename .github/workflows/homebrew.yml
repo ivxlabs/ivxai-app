@@ -61,12 +61,27 @@ jobs:
           render packaging/homebrew/ivxai-bridge.rb  "$FORMULA_SHA" tap/Formula/ivxai-bridge.rb
 
           cd tap
+
+          # The bridge was ivx-bridge until 0.3.0. Leaving the old formula in
+          # place strands everyone who installed it on that last version, so it
+          # goes, and formula_renames.json tells Homebrew to move them across.
+          # Merged rather than written: the file is shared with the rest of the
+          # tap. The README names the formula too.
+          [ -f Formula/ivx-bridge.rb ] && git rm -q Formula/ivx-bridge.rb
+          node -e '
+            const fs = require("fs"), f = "formula_renames.json";
+            const renames = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
+            renames["ivx-bridge"] = "ivxai-bridge";
+            fs.writeFileSync(f, JSON.stringify(renames, null, 2) + "\n");'
+          [ -f README.md ] && sed -i 's/ivx-bridge/ivxai-bridge/g' README.md
+
           BRANCH=$(git rev-parse --abbrev-ref HEAD)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # Only ever stage this product's own files: the tap is shared with
           # every other ivxlabs product.
-          git add Casks/ivxai-chat.rb Formula/ivxai-bridge.rb
+          git add Casks/ivxai-chat.rb Formula/ivxai-bridge.rb formula_renames.json
+          [ -f README.md ] && git add README.md
           # Re-running the workflow on an unchanged release should be a no-op,
           # not an empty commit.
           git diff --cached --quiet && { echo "tap already up to date"; exit 0; }

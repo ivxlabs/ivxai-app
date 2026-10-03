@@ -1675,7 +1675,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ivx-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "ivxai-bridge",
  "tauri",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "ivxai-bridge"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1696,6 +1696,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "webpki-root-certs",
 ]
 
 [[package]]

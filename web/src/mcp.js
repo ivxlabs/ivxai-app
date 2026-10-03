@@ -32,7 +32,7 @@ const KV_KEY = 'mcpServers';
     version, which the spec says to accept, so older servers still pair. */
 const PROTOCOL_VERSION = '2025-06-18';
 
-const CLIENT_INFO = { name: 'ivx-ai-chat', version: '0.3.0' };
+const CLIENT_INFO = { name: 'ivx-ai-chat', version: '0.3.1' };
 
 /** tools/list answers are held this long before being asked for again. */
 const TOOLS_TTL_MS = 5 * 60 * 1000;

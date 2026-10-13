@@ -787,6 +787,8 @@ async function warmModels(provider) {
 async function refreshConversations() {
   state.conversations = await store.listConversations();
   renderConvList();
+  // The welcome screen lists recent chats, so it follows the list.
+  if (!state.shared && !state.messages.length) renderMessages();
 }
 
 function renderConvList() {
@@ -1558,6 +1560,7 @@ function replaceMessageNode(msg) {
   if (!node) return;
   if (worthShowing(msg)) node.replaceWith(messageNode(msg));
   else node.remove();
+  foldOlder();
 }
 
 const actionBtn = (icon, label, onclick, extra = '') => el('button', {
@@ -1576,6 +1579,7 @@ function footNode(msg) {
     actionBtn('ri-file-copy-line', 'Copy',
       async () => toast(await copyText(msg.content) ? 'Copied' : 'Copy failed')),
     msg.role === 'user' ? actionBtn('ri-edit-line', 'Edit', () => editMessage(msg)) : null,
+    msg.role === 'user' ? actionBtn('ri-refresh-line', 'Resend', () => resendMessage(msg)) : null,
     msg.role === 'assistant' ? actionBtn('ri-refresh-line', 'Retry', () => regenerate(msg)) : null,
     actionBtn('ri-delete-bin-line', 'Delete', () => deleteOneMessage(msg), 'danger'),
   ]);
@@ -1597,6 +1601,26 @@ function welcomeNode() {
     ? 'Your chats and keys are stored only in this browser.'
     : 'Add a provider in Settings to get started.';
 
+  // Once there is history, a new chat offers a way back into it instead. The
+  // starters are only for someone who has never chatted here. Agent threads
+  // are reached through their chat, and archived chats were put away on
+  // purpose, so neither is offered.
+  const recent = state.conversations
+    .filter(c => !c.archived && !c.spawned && c.id !== state.conv?.id)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 5);
+  if (recent.length) {
+    return el('div', { class: 'welcome' }, [
+      el('h2', { text: 'Recent chats' }),
+      provider ? null : el('p', { text: subtitle }),
+      ...recent.map(conv => el('button', {
+        class: 'starter', type: 'button', text: conv.title || 'Untitled',
+        dataset: { convId: conv.id },
+        onclick: () => openConversation(conv.id),
+      })),
+    ]);
+  }
+
   return el('div', { class: 'welcome' }, [
     el('h2', { text: 'Private by default' }),
     el('p', { text: subtitle }),
@@ -1614,6 +1638,7 @@ function renderMessages(jump = false) {
     // Read-only transcript: same message styling, no actions, no composer.
     scroller.append(el('div', { class: 'thread' },
       state.shared.messages.filter(worthShowing).map(previewNode)));
+    foldOlder();
     if (jump || state.pinned) scrollToBottom();
     return;
   }
@@ -1627,6 +1652,7 @@ function renderMessages(jump = false) {
     if (worthShowing(msg)) thread.append(messageNode(msg));
   }
   scroller.append(thread);
+  foldOlder();
   if (jump || state.pinned) scrollToBottom();
 }
 
@@ -1638,7 +1664,50 @@ function appendMessage(msg) {
     clear(dom.messages).append(thread);
   }
   thread.append(messageNode(msg));
+  foldOlder();
   scrollToBottom();
+}
+
+/* Only the latest exchange — the last thing the user said and everything
+   after it — is shown in full. Anything older and long is cut to its first
+   few lines, so scrolling back through a chat is a walk past headlines rather
+   than a wall of text. A message opened stays open for the session. */
+const FOLD_REM = 8;          // matches .is-folded in app.css
+const unfolded = new Set();
+
+function foldOlder() {
+  const nodes = [...dom.messages.querySelectorAll('.thread > .msg')];
+  const latest = Math.max(0, nodes.findLastIndex(n => n.classList.contains('msg-user')));
+  const limit = FOLD_REM * parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const bodyOf = node => node.querySelector(':scope > .prose, :scope > .bubble');
+
+  // Every height first, then every change, so a long chat is laid out once
+  // rather than once per message. A little slack keeps a message that is only
+  // just over the line from folding away a single row.
+  const tall = nodes.map((node, i) => i < latest && (bodyOf(node)?.scrollHeight ?? 0) > limit * 1.25);
+
+  nodes.forEach((node, i) => {
+    const body = bodyOf(node);
+    node.querySelector(':scope > .fold-toggle')?.remove();
+    if (!tall[i]) { body?.classList.remove('is-folded'); return; }
+    const id = node.dataset.id;
+    const toggle = el('button', { class: 'fold-toggle', type: 'button' });
+    const show = folded => {
+      body.classList.toggle('is-folded', folded);
+      toggle.textContent = folded ? 'Show more' : 'Show less';
+      toggle.setAttribute('aria-expanded', String(!folded));
+    };
+    toggle.addEventListener('click', () => {
+      const fold = !body.classList.contains('is-folded');
+      if (fold) unfolded.delete(id); else unfolded.add(id);
+      show(fold);
+      // Folding a long message read to its end would leave the reader far
+      // below it; bring its top back into view.
+      if (fold) node.scrollIntoView({ block: 'nearest' });
+    });
+    show(!unfolded.has(id));
+    body.after(toggle);
+  });
 }
 
 const nodeFor = id => $(`.msg[data-id="${id}"]`, dom.messages);
@@ -1647,6 +1716,40 @@ function scrollToBottom() {
   dom.messages.scrollTop = dom.messages.scrollHeight;
   state.pinned = true;
   dom.jump.hidden = true;
+}
+
+/* A reply being written does not move the thread: someone reading higher up
+   keeps their place, and the text grows below the fold rather than pushing
+   what they are reading up the screen. Growth fires no scroll event, so the
+   jump button is brought up to date here instead. */
+function syncJump() {
+  const gap = dom.messages.scrollHeight - dom.messages.scrollTop - dom.messages.clientHeight;
+  state.pinned = gap < 80;
+  const count = state.shared ? state.shared.messages.length : state.messages.length;
+  dom.jump.hidden = state.pinned || !count;
+}
+
+/** A phone or tablet with nothing but a touchscreen to point with. */
+const touchOnly = window.matchMedia('(hover: none) and (pointer: coarse)');
+
+/* An on-screen keyboard shrinks the visual viewport only. Where the browser
+   does not resize the layout to match (iOS, and WebViews that ignore
+   interactive-widget), it pans the whole page up to reveal the composer and
+   the top bar slides off screen. Sizing the app to the visible area and
+   undoing the pan keeps the bar where it is. A pinch zoom also shrinks the
+   visual viewport and is left alone. */
+function fitToKeyboard() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement;
+  const fit = () => {
+    if (vv.scale > 1.01) { root.style.removeProperty('--app-height'); return; }
+    root.style.setProperty('--app-height', `${Math.round(vv.height)}px`);
+    if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+  };
+  vv.addEventListener('resize', fit);
+  vv.addEventListener('scroll', fit);
+  fit();
 }
 
 /* ── sending ───────────────────────────────────────────────── */
@@ -1918,7 +2021,7 @@ async function runCompletion() {
       const currentBody = $('.prose', nodeFor(current.id));
       if (!currentBody) return;
       paintBody(currentBody, current);
-      if (state.pinned) dom.messages.scrollTop = dom.messages.scrollHeight;
+      syncJump();
     });
   };
 
@@ -1974,7 +2077,7 @@ async function runCompletion() {
       current = null;
       if (state.conv?.id === convId) {
         replaceMessageNode(assistant);
-        if (state.pinned) scrollToBottom();
+        syncJump();
       }
 
       // Tools: the reply may delegate questions to agent threads, call MCP
@@ -2090,7 +2193,7 @@ async function runCompletion() {
       await store.putMessage(assistant);
       if (state.conv?.id === convId) {
         replaceMessageNode(assistant);
-        if (state.pinned) scrollToBottom();
+        syncJump();
       }
     }
   } finally {
@@ -2106,7 +2209,7 @@ async function runCompletion() {
       await store.putConversation(record);
       await refreshConversations();
     }
-    if (isCurrent && state.pinned) scrollToBottom();
+    if (isCurrent) syncJump();
   }
 }
 
@@ -2169,6 +2272,17 @@ async function editMessage(msg) {
   await truncateFrom(index + 1);
   msg.content = text;
   await store.putMessage(msg);
+  renderMessages();
+  await runCompletion();
+}
+
+/** Ask again, word for word: everything after the message goes and it is
+    answered afresh. Edit and resend, without the edit. */
+async function resendMessage(msg) {
+  if (state.streaming?.convId === state.conv?.id) return;
+  const index = state.messages.findIndex(m => m.id === msg.id);
+  if (index < 0) return;
+  await truncateFrom(index + 1);
   renderMessages();
   await runCompletion();
 }
@@ -2542,10 +2656,10 @@ function chatMenuScreen() {
   return el('div', {}, [
     el('div', { class: 'group' }, [
       el('div', { class: 'item-list' }, [
-        row('Rename', renameChat),
+        row('Rename', () => renameChat()),
         row('Chat settings', () => pushScreen({ title: 'Chat settings', render: chatSettingsScreen })),
-        row('Duplicate', duplicateChat),
-        row(state.conv.archived ? 'Unarchive chat' : 'Archive chat', archiveChat),
+        row('Duplicate', () => duplicateChat()),
+        row(state.conv.archived ? 'Unarchive chat' : 'Archive chat', () => archiveChat()),
       ]),
     ]),
     el('div', { class: 'group' }, [
@@ -2557,8 +2671,8 @@ function chatMenuScreen() {
     ]),
     el('div', { class: 'group' }, [
       el('div', { class: 'item-list' }, [
-        row('Clear messages', clearChat, true),
-        row('Delete chat', deleteChat, true),
+        row('Clear messages', () => clearChat(), true),
+        row('Delete chat', () => deleteChat(), true),
       ]),
     ]),
   ]);
@@ -3231,7 +3345,7 @@ function menuFor(target) {
   const message = target.closest('.msg');
   if (message) return messageMenu(message);
 
-  const row = target.closest('.conv-item[data-conv-id]');
+  const row = target.closest('.conv-item[data-conv-id], .starter[data-conv-id]');
   if (row) return chatMenu(state.conversations.find(c => c.id === row.dataset.convId));
 
   if (target.closest('#modelChip')) return agentMenu();
@@ -3385,6 +3499,7 @@ function messageSections(node) {
     copy,
     [
       msg.role === 'user' && { label: 'Edit and resend', disabled: busy, onSelect: () => editMessage(msg) },
+      msg.role === 'user' && { label: 'Resend', disabled: busy, onSelect: () => resendMessage(msg) },
       msg.role === 'assistant' && { label: 'Retry from here', disabled: busy, onSelect: () => regenerate(msg) },
       msg.threadId && { label: 'Open thread', onSelect: () => openConversation(msg.threadId) },
       { label: 'Delete message', danger: true, disabled: busy, onSelect: () => deleteOneMessage(msg) },
@@ -3564,11 +3679,16 @@ function bindEvents() {
     // also send the message.
     if (mentionKey(ev)) { ev.preventDefault(); return; }
     if (ev.key !== 'Enter') return;
-    const send = state.ui.sendOnEnter ? !ev.shiftKey : (ev.metaKey || ev.ctrlKey);
+    // An on-screen keyboard has no Shift+Enter worth the name, so its return
+    // key is a line break, as it is everywhere else on a phone; the send
+    // button is right beside it.
+    const sendOnEnter = state.ui.sendOnEnter && !touchOnly.matches;
+    const send = sendOnEnter ? !ev.shiftKey : (ev.metaKey || ev.ctrlKey);
     if (send) { ev.preventDefault(); handleSubmit(); }
   });
   updateSendState();
 
+  fitToKeyboard();
   $('#btnMenu').addEventListener('click', openDrawer);
   $('#btnCloseDrawer').addEventListener('click', closeDrawer);
   $('#scrim').addEventListener('click', closeDrawer);
@@ -3597,12 +3717,7 @@ function bindEvents() {
     renderConvList();
   }, 180));
 
-  dom.messages.addEventListener('scroll', () => {
-    const gap = dom.messages.scrollHeight - dom.messages.scrollTop - dom.messages.clientHeight;
-    state.pinned = gap < 80;
-    const count = state.shared ? state.shared.messages.length : state.messages.length;
-    dom.jump.hidden = state.pinned || !count;
-  });
+  dom.messages.addEventListener('scroll', syncJump);
 
   // Tapping a message reveals its meta and actions; everything stays hidden
   // until then so the thread reads as plain conversation.

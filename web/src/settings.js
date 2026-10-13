@@ -1595,7 +1595,7 @@ function appearanceScreen() {
     ]),
     group(null, [
       switchRow('Enter sends the message', ui.sendOnEnter, v => app.setUI({ sendOnEnter: v })),
-    ], 'With this off, Enter starts a new line and ⌘/Ctrl+Enter sends.'),
+    ], 'With this off, Enter starts a new line and ⌘/Ctrl+Enter sends. On a touchscreen keyboard, Enter always starts a new line.'),
   ]);
 }
 

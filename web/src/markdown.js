@@ -7,9 +7,11 @@
    every tag in the output is one this file wrote. Model output can therefore
    never inject HTML. URLs are scheme-checked before they reach an href.
    Fenced code is the one exception, and only in form: highlight.js escapes
-   the source itself and adds nothing but its own <span> wrappers. */
+   the source itself and adds nothing but its own <span> wrappers. Math is
+   the other, for the same reason: KaTeX escapes what it typesets. */
 
 import { highlightCode } from './highlight.js';
+import { renderMath } from './math.js';
 
 const escapeHtml = s => s
   .replace(/&/g, '&amp;')
@@ -203,6 +205,21 @@ function renderBlocks(src) {
   return out.join('');
 }
 
+/* ── math ──────────────────────────────────────────────────── */
+
+/* Display math first, then inline. A code span is matched only so that it is
+   skipped — `$PATH` is shell, not TeX. A single $ follows Pandoc's rule so
+   prices survive: the opening one is followed by a non-space, the closing one
+   preceded by a non-space and not followed by a digit, so "$5 and $10" stays
+   text. */
+const RE_MATH = new RegExp([
+  /(`+)(?:(?!\n\n)[\s\S])*?\1/.source,
+  /\$\$([\s\S]+?)\$\$/.source,
+  /\\\[([\s\S]+?)\\\]/.source,
+  /\\\(([\s\S]+?)\\\)/.source,
+  /(?<![\\$\w])\$(?=[^\s$])((?:\\.|[^$\\\n])+?)(?<=[^\s\\])\$(?![\d$\w])/.source,
+].join('|'), 'g');
+
 /* ── entry point ───────────────────────────────────────────── */
 
 export function renderMarkdown(source) {
@@ -232,7 +249,19 @@ export function renderMarkdown(source) {
     }
   );
 
-  return renderBlocks(escapeHtml(withoutCode))
+  // Math comes out next, before escaping, for the same reason: \frac{a}{b}
+  // and x_1 * y_2 must not be read as markup. An unclosed $$ while streaming
+  // shows as text until its partner arrives.
+  const maths = [];
+  const withoutMath = withoutCode.replace(RE_MATH, (m, ticks, dd, bracket, paren, single) => {
+    if (ticks) return m;
+    const display = dd !== undefined || bracket !== undefined;
+    maths.push(renderMath((dd ?? bracket ?? paren ?? single).trim(), display, m));
+    return `\u0000M${maths.length - 1}\u0000`;
+  });
+
+  return renderBlocks(escapeHtml(withoutMath))
     .replace(/<p>\u0000B(\d+)\u0000<\/p>|\u0000B(\d+)\u0000/g,
-      (m, a, b) => blocks[Number(a ?? b)] || '');
+      (m, a, b) => blocks[Number(a ?? b)] || '')
+    .replace(/\u0000M(\d+)\u0000/g, (m, i) => maths[Number(i)] || '');
 }

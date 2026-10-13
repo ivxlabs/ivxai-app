@@ -62,6 +62,9 @@ function serviceWorkerPrecache() {
         // They stay ordinary same-origin assets, so the fetch handler caches
         // them on first use instead — offline still works, once used.
         .filter(f => !f.endsWith('.wasm'))
+        // KaTeX's stylesheet lists a .ttf beside every .woff2; same story as
+        // the .woff above.
+        .filter(f => !f.endsWith('.ttf'))
         .filter(f => statSync(join(outDir, f)).size <= PRECACHE_MAX_BYTES)
         .sort();
 
